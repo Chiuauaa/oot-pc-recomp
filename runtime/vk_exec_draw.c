@@ -122,12 +122,12 @@ static struct {
     VkBuffer sup_buf;
     VkDeviceSize sup_off;
     int sup_valid;
-    uint8_t c0[3][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute) and where it lives
-    VkBuffer c0_buf[3];
-    VkDeviceSize c0_off[3];
-    int c0_valid[3];
+    uint8_t c0[4][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute, geometry) and where it lives
+    VkBuffer c0_buf[4];
+    VkDeviceSize c0_off[4];
+    int c0_valid[4];
     struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; Nvn2C0Layout lay; uint8_t has_lay;
-             uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[3];   // what vk_c0_fill read for c0[k]
+             uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[4];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
     VkDescriptorSet ds_bound[2];         // allocated set bound per set number (0: none or pushed since)
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
@@ -812,6 +812,57 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
     if (locked) vk_texture_unlock();
 }
 
+// DKB_NATIVE_GS=1 runs lowered native passthrough geometry stages through the portable path (issue #45). Off by default.
+// Eglantine takes the varyings from the hardware skip mask (Maxwell register 0x1240, translate_program.cpp,
+// LowerGeometryPassthrough); the host does not have that mask for NVN 2 programs, so this infers it: what the vertex
+// stage writes and the fragment stage reads. That is enough for a fragment stage that reads nothing, as the terrain's
+// does; a stage whose real mask differs would forward the wrong set.
+static int native_gs_on(void) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("TOTK_NATIVE_GS");
+    return on;
+}
+
+static const GfxShader *native_gs_vs, *native_gs_fs;   // the draw's stages, set before its geometry lookup
+
+static const uint8_t *native_gs_control(const uint8_t *ctl, const uint8_t *code, uint32_t len) {
+    // nvn2_lower.cpp::nvn2_lower keeps these source controls for the process lifetime. Keep the packed copies
+    // just as long, including after the first 256 contexts; shader_for borrows them even on shader-cache hits.
+    static struct { const uint8_t *ctl; uint32_t mask; uint8_t *copy; } *made;
+    static size_t count, capacity;
+    GfxShaderIo io[32];
+    const uint32_t fs_in = gfx_shader_inputs(native_gs_fs, io), vs_out = gfx_shader_outputs(native_gs_vs, io);
+    const uint32_t mask = fs_in & vs_out;
+    for (size_t i = 0; i < count; i++)
+        if (made[i].ctl == ctl && made[i].mask == mask) return made[i].copy;
+    uint32_t skip[8];
+    skip[0] = 0x0fffffffu;
+    for (unsigned i = 1; i < 8; i++) skip[i] = UINT32_MAX;
+    for (unsigned l = 0; l < 32; l++)
+        if (mask >> l & 1) skip[1 + l / 8] &= ~(15u << (l % 8 * 4));
+    uint8_t *copy = malloc(0x880);
+    if (!copy) return NULL;
+    memcpy(copy, ctl, 0x880);
+    if (!nvn_geometry_control_pack_lowered(copy, 0x880, code, len, skip)) {
+        rt_log("native GS: stage %016llx does not fit the portable control", (unsigned long long)nvn2_origin(code));
+        free(copy);
+        return NULL;
+    }
+    if (count == capacity) {
+        if (capacity > SIZE_MAX / 2) { free(copy); return NULL; }
+        size_t next = capacity ? capacity * 2 : 256;
+        if (next > SIZE_MAX / sizeof *made) { free(copy); return NULL; }
+        void *grown = realloc(made, next * sizeof *made);
+        if (!grown) { free(copy); return NULL; }
+        made = grown, capacity = next;
+    }
+    made[count].ctl = ctl, made[count].mask = mask, made[count].copy = copy;
+    count++;
+    rt_log("native GS: stage %016llx forwards locations %#x (vertex writes %#x, fragment reads %#x)",
+           (unsigned long long)nvn2_origin(code), mask, vs_out, fs_in);
+    return copy;
+}
+
 // *present: the program has this stage. Returns NULL when it has not or the translation failed. pending (graphics
 // stages, vk_pipeline_async_on): a shader not translated yet is queued and NULL returned with *pending = 1. await: a
 // shader queued earlier is waited for (gfx_shader_await) instead.
@@ -822,6 +873,13 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     if (pending) *pending = 0;
     if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
     *present = 1;
+    if (st == NVN_STAGE_GS && native_gs_on() && nvn2_origin(code)) {
+        if (!native_gs_vs || !native_gs_fs) {   // its varyings follow from the other stages, which are still pending
+            if (pending) *pending = 1;
+            return NULL;
+        }
+        if (!(ctl = native_gs_control(ctl, code, len))) return NULL;
+    }
     GfxShaderAnswers a;
     uint64_t serial = ex->prog->serial;
     answers_for(ex, st, ctl, slot_mask_of(serial, st), &a);
@@ -934,7 +992,8 @@ void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16],
         return;
     }
     memset(bank, 0, VK_C0_BYTES);
-    int base =stage == NVN_STAGE_VS ? 0x110 : stage == NVN_STAGE_FS ? 0x510 : stage == NVN_STAGE_CS ? 0x310 : -1;
+    int base =stage == NVN_STAGE_VS ? 0x110 : stage == NVN_STAGE_FS ? 0x510 : stage == NVN_STAGE_CS ? 0x310 :
+              stage == NVN_STAGE_GS ? 0x410 : -1;   // geometry (DKB_NATIVE_GS): the table ssbo_slot expects
     if (base < 0) return;
     c0_table(bank + base, ssbo);
     if (stage == NVN_STAGE_CS) {
@@ -957,9 +1016,9 @@ static int c0_on(void) {   // TOTK_FIX_C0=0: c0 reads zeros instead of the drive
 
 // c0 from replay scratch; a bank equal to the stage's previous one reuses its range, so it costs no copy.
 static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
-    if (st != NVN_STAGE_VS && st != NVN_STAGE_FS && st != NVN_STAGE_CS)
+    if (st != NVN_STAGE_VS && st != NVN_STAGE_FS && st != NVN_STAGE_CS && st != NVN_STAGE_GS)
         rt_fatal("vk_exec: synthetic c0 is unavailable for stage %d", st);
-    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : 2;
+    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : st == NVN_STAGE_GS ? 3 : 2;
     // vk_c0_fill reads buffer bindings, compute root words and dispatch size, or the graphics base instance:
     // equal inputs give the same bank, so neither the fill nor the 2 KiB compare is needed.
     typeof(B.c0_in[0]) in;
@@ -2211,6 +2270,42 @@ typedef struct {
 // 782b2585777d2b4e, 392e2956038a9e64 and 7d85669ac430f01a read Location 9, feed every attribute per instance and carry
 // the same integer code (four reads of c9 at a computed index), and skipping every such quad left out ten vertex stages
 // that drew in all 17 logged runs. So it is matched by the name of its NVN 2 stage.
+// LOCAL DIAGNOSTIC, not for a PR. DKB_PAIR_LOG=1 logs each new (vs, fs, gs) stage set at its first draw, to name the
+// draw behind a lost device. DKB_SKIP_STAGE=<hex>[,<hex>] skips the draws that use one of those NVN 2 stages.
+// ponytail: a fixed table and list, enough for one session's stage sets; it stops logging when full.
+static int stage_diag_skip(const VkExec *ex, const GfxShader *vs) {
+    static int on = -1, nskip;
+    static uint64_t skip[16], seen[1 << 16];
+    if (on < 0) {
+        const char *e = getenv("DKB_SKIP_STAGE"), *l = getenv("DKB_PAIR_LOG");
+        for (char *end; e && *e && nskip < 16; e = *end ? end + 1 : end) skip[nskip++] = strtoull(e, &end, 16);
+        on = (l && *l == '1') ? 2 : nskip > 0;
+    }
+    if (!on) return 0;
+    static const int st[3] = {NVN_STAGE_VS, NVN_STAGE_FS, NVN_STAGE_GS};
+    uint64_t o[3] = {0}, h = 1469598103934665603ull;
+    for (int i = 0; i < 3; i++) {
+        const uint8_t *ctl, *code = NULL;
+        uint32_t len;
+        if (find_stage(ex->prog, st[i], &ctl, &code, &len)) o[i] = nvn2_origin(code);
+        h = (h ^ o[i]) * 1099511628211ull;
+        for (int k = 0; k < nskip; k++) if (o[i] && o[i] == skip[k]) return 1;
+    }
+    if (on == 2) {
+        if (!h) h = 1;
+        for (uint32_t i = (uint32_t)h & 0xffff, n = 0; n < 1 << 12; i = (i + 1) & 0xffff, n++) {
+            if (seen[i] == h) break;
+            if (!seen[i]) {
+                seen[i] = h;
+                GfxShaderIo io[32];
+                rt_log("stage set: vs %016llx fs %016llx gs %016llx inputs %08llx", (unsigned long long)o[0], (unsigned long long)o[1], (unsigned long long)o[2], vs ? (unsigned long long)gfx_shader_inputs(vs, io) : 0ull);
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
 static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     static int on = -1;
     if (on < 0) on = !rt_game_version && cfg_bool("TOTK_FIX_VS_FAULT") && vk_ctx()->props.vendorID == 0x10de;   // 0: Bananza
@@ -2299,9 +2394,27 @@ static int experimental_geometry_on(void) {
 }
 
 // 1: an opted-in ordinary GS is required; 0: preserve the existing VS/FS path; -1: this opted-in draw is unsupported.
-// Inspect raw NVN2 markers before any NVN1 control offsets. No native shader is admitted by this experiment.
+// Inspect raw NVN2 markers before any NVN1 control offsets. TOTK_EXPERIMENTAL_GEOMETRY admits no native shader; only
+// DKB_NATIVE_GS does, for the passthrough subset checked first.
 static int geometry_draw(VkExec *ex, uint32_t prim) {
     geometry_input = 0;
+    if (native_gs_on() && ex->prog) {   // native failures keep VS/FS; ordinary stages retain their separate opt-in
+        const uint8_t *ctl, *code, *fctl, *fcode;
+        uint32_t len, flen, sph[5];
+        if (!find_stage(ex->prog, NVN_STAGE_GS, &ctl, &code, &len)) return 0;
+        if (nvn2_origin(code)) {
+            if (len < 0x30 + 0x60 || !find_stage(ex->prog, NVN_STAGE_FS, &fctl, &fcode, &flen) ||
+                vk_geometry_input(prim) != GFX_GEOMETRY_TRIANGLES) return 0;
+            memcpy(sph, code + 0x30, sizeof sph);
+            if (!(sph[0] & (1u << 24)) || sph[2] >> 24 != 1 || (sph[3] >> 24 & 15) != 7 || (sph[4] & 0xfff) != 1) {
+                warn_once(W_GEOMETRY, "native GS: a stage outside the passthrough subset keeps the vertex and fragment path");
+                return 0;
+            }
+            geometry_input = GFX_GEOMETRY_TRIANGLES;
+            return 1;
+        }
+        // An ordinary GS still follows its own opt-in and validation below.
+    }
     if (!experimental_geometry_on() || !ex->prog) return 0;
     int found = 0, portable = 0;
     uint32_t stages = 0;
@@ -2382,6 +2495,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         SM.valid = 0;
         vs = shader_for(ex, NVN_STAGE_VS, &has_vs, &vs_wait, 0);
         fs = shader_for(ex, NVN_STAGE_FS, &has_fs, &fs_wait, 0);
+        native_gs_vs = vs, native_gs_fs = fs;
         if (want_gs) gs = shader_for(ex, NVN_STAGE_GS, &has_gs, &gs_wait, 0);
         if (memo && vs && !vs_wait && !fs_wait && !gs_wait && (!has_fs || fs) && (!want_gs || (has_gs && gs)))
             memo_key(ex, gen, &SM.k), SM.vs = vs, SM.fs = fs, SM.gs = gs, SM.has_fs = has_fs, SM.has_gs = has_gs, SM.valid = 1;
@@ -2421,8 +2535,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         perf_count(PERF_CNT_ONESHOT_WAIT);
         if (vs_wait) vs = shader_for(ex, NVN_STAGE_VS, &has_vs, NULL, 1);
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
+        native_gs_vs = vs, native_gs_fs = fs;
         if (gs_wait) gs = shader_for(ex, NVN_STAGE_GS, &has_gs, NULL, 1);
     }
+    if (stage_diag_skip(ex, vs)) return 0;
     if (light_quad_fault_skip(ex, vs, fs)) return 0;
     if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) return 0;
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
@@ -2903,6 +3019,7 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
         case 4: memcpy(&ex->pipe.poly, b->bytes, sizeof ex->pipe.poly); break;
         case 5: memcpy(&ex->pipe.ds, b->bytes, sizeof ex->pipe.ds); break;
         case 6: memcpy(&ex->point_size, b->bytes, sizeof ex->point_size); break;
+        case 7: memcpy(&ex->pipe.alpha_ref, b->bytes, sizeof ex->pipe.alpha_ref); break;
         }
         break;
     }
