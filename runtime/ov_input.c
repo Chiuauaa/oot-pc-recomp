@@ -78,6 +78,37 @@ static void ov_style_set(Cpu *c) {
     ret_x(c, v);
 }
 
+// TOTK_FAKE_BUTTONS="<hex mask>@<start s>+<seconds>[,...]": presses those Switch buttons for that long, counted from the
+// moment the guest started, as if the controller did. For testing a build without a person at the keyboard. Bits: A 0, B 1,
+// X 2, Y 3, L stick 4, R stick 5, L 6, R 7, ZL 8, ZR 9, Plus 10, Minus 11, D-pad left 12, up 13, right 14, down 15.
+typedef struct { uint64_t mask; double start, len; } FakePress;
+static FakePress fake_press[16];
+static int fake_n = -1;   // -1: not read yet
+
+static uint64_t fake_buttons(void) {
+    if (fake_n < 0) {
+        fake_n = 0;
+        const char *v = cfg_get("TOTK_FAKE_BUTTONS");
+        while (v && *v && fake_n < 16) {
+            char *end;
+            uint64_t m = strtoull(v, &end, 16);
+            double st = 0, ln = 1;
+            if (*end == '@') st = strtod(end + 1, &end);
+            if (*end == '+') ln = strtod(end + 1, &end);
+            fake_press[fake_n++] = (FakePress){m, st, ln};
+            v = *end == ',' ? end + 1 : end;
+            if (end == v && *end) break;
+        }
+        if (fake_n) rt_log("hid: TOTK_FAKE_BUTTONS: %d scripted presses", fake_n);
+    }
+    if (!fake_n || !rt_guest_start_ns) return 0;
+    double t = (double)(kern_now_ns() - rt_guest_start_ns) / 1e9;
+    uint64_t m = 0;
+    for (int i = 0; i < fake_n; i++)
+        if (t >= fake_press[i].start && t < fake_press[i].start + fake_press[i].len) m |= fake_press[i].mask;
+    return m;
+}
+
 // int GetNpadStates(<State> *out, int count, const NpadIdType &id): the newest state only. want: the style of the
 // overload, 0 for the Joy-Con overloads (never connected).
 static void npad_states(Cpu *c, uint32_t want) {
@@ -93,6 +124,12 @@ static void npad_states(Cpu *c, uint32_t want) {
     if (live) {
         s.attributes = ATTR_CONNECTED;
         input_poll(&s.buttons, &s.lx, &s.ly, &s.rx, &s.ry);
+        s.buttons |= fake_buttons();
+        static volatile int32_t first_args, first_button;
+        if (!plat_xchg32(&first_args, 1)) rt_log("hid: GetNpadStates first asked: style %u, id %#x, count %d", want, id, max);
+        if (s.buttons && !plat_xchg32(&first_button, 1))
+            rt_log("hid: the game was handed buttons %#llx for the first time (sampling %lld)", (unsigned long long)s.buttons,
+                   (long long)s.sampling);
     }
     *out = s;
     ret_x(c, 1);
@@ -110,6 +147,9 @@ static void ov_hold_type(Cpu *c) {
 // void DisconnectNpad(const NpadIdType &id): only the controller in use (handheld mode disconnects player 1)
 static void ov_disconnect(Cpu *c) {
     uint32_t id = *need_id(c, 0, "DisconnectNpad");
+    char at[96];
+    rt_log("hid: the game disconnected controller id %#x (ours is %#x)%s from %s", id, pad_id(),
+           id == pad_id() ? ": input is off" : "", ldr_describe(c->x[30] - 4, at, sizeof at));
     if (id != pad_id()) return;
     plat_mutex_lock(&lock);
     allowed = 0;

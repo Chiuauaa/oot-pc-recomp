@@ -13,11 +13,14 @@
 // - a submission with no reserved buffer to decode into answers "not ready" (the wrapper's retry code 0x76);
 // - the picture is read with ReadDecoderOutputImageNv12 (Y plane, then interleaved UV, each with the caller's pitch).
 //   GetDecoderImagePoolNativeImageHandle (the player's GPU path) has no image yet and returns 0.
-// libvpx is BSD-3-Clause and already linked for ov_movie.c.
+// libvpx is BSD-3-Clause and already linked for ov_movie.c. AV1 (Ocarina of Time's cutscenes are AV1) is decoded with dav1d
+// (BSD-2-Clause), VP8 and VP9 with libvpx; every codec hands its pictures over as 8-bit NV12.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include <dav1d/dav1d.h>
+#include <errno.h>
 #include <vpx/vp8dx.h>
 #include <vpx/vpx_decoder.h>
 
@@ -57,10 +60,14 @@ typedef struct {
 // A packet submitted while no buffer was reserved for its picture, decoded once one is (ov_vp9_acquire).
 typedef struct { uint8_t *data; size_t size; int64_t pts; int end; } Packet;
 
+enum { CODEC_NONE, CODEC_VP9, CODEC_VP8, CODEC_AV1 };
+
 typedef struct {
     uint64_t key;      // guest Vp9DecoderType; 0: unused
     vpx_codec_ctx_t vpx;
     int vpx_ok;
+    Dav1dContext *av1;   // AV1: dav1d (NULL for the libvpx codecs)
+    int codec;           // CODEC_*
     uint32_t seq;
     Slot slot[SLOTS];
     Slot last;         // the newest picture, for packets that show none
@@ -98,6 +105,78 @@ static void put_picture(Slot *s, const vpx_image_t *img) {
     }
 }
 
+// A decoded dav1d picture as NV12 in s: 8-bit or 10/12-bit (shifted down) luma, chroma sampled to 4:2:0 from any layout.
+static void put_picture_av1(Slot *s, const Dav1dPicture *p) {
+    uint16_t w = (uint16_t)p->p.w, h = (uint16_t)p->p.h;
+    if (!s->nv12 || s->w != w || s->h != h) {
+        free(s->nv12);
+        s->nv12 = malloc((size_t)w * h + 2 * (size_t)cw(w) * ch(h));
+        if (!s->nv12) rt_fatal("codec: out of memory for a %ux%u picture", w, h);
+        s->w = w, s->h = h;
+    }
+    const int shift = p->p.bpc > 8 ? p->p.bpc - 8 : 0;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *src = (const uint8_t *)p->data[0] + (ptrdiff_t)y * p->stride[0];
+        uint8_t *dst = s->nv12 + (size_t)y * w;
+        if (!shift) memcpy(dst, src, w);
+        else for (uint32_t x = 0; x < w; x++) dst[x] = (uint8_t)(((const uint16_t *)src)[x] >> shift);
+    }
+    uint8_t *uv = s->nv12 + (size_t)w * h;
+    const int gray = p->p.layout == DAV1D_PIXEL_LAYOUT_I400;
+    const int ssx = p->p.layout == DAV1D_PIXEL_LAYOUT_I420 || p->p.layout == DAV1D_PIXEL_LAYOUT_I422;
+    const int ssy = p->p.layout == DAV1D_PIXEL_LAYOUT_I420;
+    for (uint32_t y = 0; y < ch(h); y++) {
+        uint8_t *o = uv + (size_t)y * 2 * cw(w);
+        for (uint32_t x = 0; x < cw(w); x++) {
+            uint8_t u = 128, v = 128;
+            if (!gray) {
+                uint32_t sx = ssx ? x : 2 * x, sy = ssy ? y : 2 * y;
+                const uint8_t *ru = (const uint8_t *)p->data[1] + (ptrdiff_t)sy * p->stride[1];
+                const uint8_t *rv = (const uint8_t *)p->data[2] + (ptrdiff_t)sy * p->stride[1];
+                if (shift) u = (uint8_t)(((const uint16_t *)ru)[sx] >> shift), v = (uint8_t)(((const uint16_t *)rv)[sx] >> shift);
+                else u = ru[sx], v = rv[sx];
+            }
+            o[2 * x] = u, o[2 * x + 1] = v;
+        }
+    }
+}
+
+// Feeds one AV1 temporal unit to dav1d and returns the last picture it shows in *out (1), or 0 when it shows none.
+static int av1_decode(Dec *d, const uint8_t *data, size_t size, int64_t pts, Dav1dPicture *out) {
+    Dav1dData dd;
+    uint8_t *buf = dav1d_data_create(&dd, size);
+    if (!buf) return 0;
+    memcpy(buf, data, size);
+    dd.m.timestamp = pts;
+    int got = 0;
+    while (dd.sz > 0) {
+        int r = dav1d_send_data(d->av1, &dd);
+        if (r < 0 && r != DAV1D_ERR(EAGAIN)) {
+            LOG_FIRST("codec: AV1 packet of %zu bytes failed (%d)", size, r);
+            break;
+        }
+        Dav1dPicture pic;
+        memset(&pic, 0, sizeof pic);
+        r = dav1d_get_picture(d->av1, &pic);
+        if (r == 0) {
+            if (got) dav1d_picture_unref(out);
+            *out = pic, got = 1;
+        } else if (r != DAV1D_ERR(EAGAIN)) {
+            LOG_FIRST("codec: AV1 picture failed (%d)", r);
+            break;
+        }
+    }
+    if (dd.sz > 0) dav1d_data_unref(&dd);
+    for (;;) {   // pictures the decoder held back behind this packet
+        Dav1dPicture pic;
+        memset(&pic, 0, sizeof pic);
+        if (dav1d_get_picture(d->av1, &pic) != 0) break;
+        if (got) dav1d_picture_unref(out);
+        *out = pic, got = 1;
+    }
+    return got;
+}
+
 static void copy_slot(Slot *to, const Slot *from) {
     if (!from->nv12) return;
     size_t n = (size_t)from->w * from->h + 2 * (size_t)cw(from->w) * ch(from->h);
@@ -127,6 +206,10 @@ static Slot *oldest_wait(Dec *d) {
 // signal, stored in wake.
 static int decode_into(Dec *d, Slot *s, const uint8_t *data, size_t size, int64_t pts, int end, uint64_t wake[WAITERS]) {
     const vpx_image_t *img = NULL, *f;
+    Dav1dPicture av1pic;
+    int have_av1 = 0;
+    memset(&av1pic, 0, sizeof av1pic);
+    if (d->av1 && data && size) have_av1 = av1_decode(d, data, size, pts, &av1pic);
     if (d->vpx_ok && data && size) {
         if (vpx_codec_decode(&d->vpx, data, (unsigned)size, NULL, 0) != VPX_CODEC_OK)
             LOG_FIRST("codec: VP9 packet of %zu bytes failed: %s", size, vpx_codec_error_detail(&d->vpx));
@@ -135,7 +218,11 @@ static int decode_into(Dec *d, Slot *s, const uint8_t *data, size_t size, int64_
     }
     int filled = 1;
     if (img) put_picture(s, img), copy_slot(&d->last, s);
-    else if (end && d->last.nv12) copy_slot(s, &d->last);
+    else if (have_av1) {
+        put_picture_av1(s, &av1pic);
+        dav1d_picture_unref(&av1pic);
+        copy_slot(&d->last, s);
+    } else if (end && d->last.nv12) copy_slot(s, &d->last);
     else if (end) {
         vpx_image_t black = {.d_w = 16, .d_h = 16};
         static uint8_t y[16 * 16], uv[8 * 8];
@@ -160,30 +247,46 @@ static int decode_into(Dec *d, Slot *s, const uint8_t *data, size_t size, int64_
 static void ov_video_init(Cpu *c) { ret_x(c, 0); }
 static void ov_video_fini(Cpu *c) { ret_x(c, 0); }
 
-// host_decoder 0: the codec has no host decoder (AV1, VP8 here), the decoder takes packets and answers with black pictures
-static void codec_init(Cpu *c, uint64_t key, unsigned w, unsigned h, int host_decoder, const char *name) {
+// kind: CODEC_VP9 / CODEC_VP8 (libvpx), CODEC_AV1 (dav1d); CODEC_NONE takes packets and answers with black pictures
+static void codec_init(Cpu *c, uint64_t key, unsigned w, unsigned h, int kind, const char *name) {
     plat_mutex_lock(&lock);
     Dec *d = dec_of(key);
     if (!d) d = dec_of(0);
     if (!d) rt_fatal("codec: more than %d VP9 decoders", DECODERS);
     if (d->vpx_ok) vpx_codec_destroy(&d->vpx);
+    if (d->av1) dav1d_close(&d->av1);
     for (int i = 0; i < SLOTS; i++) free(d->slot[i].nv12);
     free(d->last.nv12);
     queue_drop(d);
     memset(d, 0, sizeof *d);
     d->key = key;
+    d->codec = kind;
     vpx_codec_dec_cfg_t cfg = {.threads = 2, .w = w, .h = h};
-    d->vpx_ok = host_decoder && vpx_codec_dec_init(&d->vpx, vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
+    int ok = 0;
+    const char *lib = "libvpx";
+    if (kind == CODEC_VP9 || kind == CODEC_VP8) {
+        d->vpx_ok = vpx_codec_dec_init(&d->vpx, kind == CODEC_VP9 ? vpx_codec_vp9_dx() : vpx_codec_vp8_dx(), &cfg, 0) ==
+                    VPX_CODEC_OK;
+        ok = d->vpx_ok;
+    } else if (kind == CODEC_AV1) {
+        Dav1dSettings st;
+        dav1d_default_settings(&st);
+        st.n_threads = 2;
+        st.max_frame_delay = 1;   // a packet's picture comes back with it, not frames later
+        ok = dav1d_open(&d->av1, &st) == 0;
+        if (!ok) d->av1 = NULL;
+        lib = "dav1d";
+    }
     plat_mutex_unlock(&lock);
-    if (host_decoder)
-        rt_log("codec: %s decoder %#llx %ux%u on the host (libvpx%s)", name, (unsigned long long)key, w, h,
-               d->vpx_ok ? "" : " failed to start: pictures stay black");
+    if (kind != CODEC_NONE)
+        rt_log("codec: %s decoder %#llx %ux%u on the host (%s%s)", name, (unsigned long long)key, w, h, lib,
+               ok ? "" : " failed to start: pictures stay black");
     else
-        rt_log("codec: %s decoder %#llx %ux%u: the host has no %s decoder yet, pictures stay black", name,
+        rt_log("codec: %s decoder %#llx %ux%u: the host has no %s decoder, pictures stay black", name,
                (unsigned long long)key, w, h, name);
     ret_x(c, 0);
 }
-static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) { codec_init(c, key, w, h, 1, "VP9"); }
+static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) { codec_init(c, key, w, h, CODEC_VP9, "VP9"); }
 // Result InitializeVp9Decoder(Vp9DecoderType *, void *work, size_t, size_t, u16 w, u16 h, u32, input, output fmt)
 static void ov_vp9_init(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff); }
 // Result InitializeVp9Decoder(Vp9DecoderType *, size_t, size_t, u16 w, u16 h, u32, input, output fmt)
@@ -192,9 +295,11 @@ static void ov_vp9_init_nowork(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 3) & 
 // SDK 22 (Ocarina of Time): InitializeXDecoderByTransferMemory(XDecoderType *, void *memory, size_t, size_t, u16 w, u16 h, u32,
 // input, output, mode) has the argument order of InitializeVp9Decoder; ...ByRemoteMemory(XDecoderType *, u64 memory, u16 w,
 // u16 h, u32, ...) takes the remote memory in place of the work buffer.
-static void ov_av1_init(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff, 0, "AV1/VP8"); }
-static void ov_vp9_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, 1, "VP9"); }
-static void ov_av1_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, 0, "AV1/VP8"); }
+static void ov_av1_init(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff, CODEC_AV1, "AV1"); }
+static void ov_vp8_init(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff, CODEC_VP8, "VP8"); }
+static void ov_vp9_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, CODEC_VP9, "VP9"); }
+static void ov_av1_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, CODEC_AV1, "AV1"); }
+static void ov_vp8_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, CODEC_VP8, "VP8"); }
 
 // Result FinalizeVp9Decoder(Vp9DecoderType *)
 static void ov_vp9_fini(Cpu *c) {
@@ -202,6 +307,7 @@ static void ov_vp9_fini(Cpu *c) {
     Dec *d = dec_of(arg_x(c, 0));
     if (d) {
         if (d->vpx_ok) vpx_codec_destroy(&d->vpx);
+        if (d->av1) dav1d_close(&d->av1);
         for (int i = 0; i < SLOTS; i++) free(d->slot[i].nv12);
         free(d->last.nv12);
         queue_drop(d);
@@ -559,13 +665,13 @@ HOST_OVERRIDE("_ZN2nn5codec33GetAv1DecoderSubmissionReadyEventEPNS0_14Av1Decoder
 HOST_OVERRIDE("_ZN2nn5codec33GetVp8DecoderSubmissionReadyEventEPNS0_14Vp8DecoderTypeE", ov_vp9_ready_event_sdk22);
 HOST_OVERRIDE("_ZN2nn5codec33GetVp9DecoderSubmissionReadyEventEPNS0_14Vp9DecoderTypeE", ov_vp9_ready_event_sdk22);
 HOST_OVERRIDE("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init_remote);
-HOST_OVERRIDE("_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init_remote);
+HOST_OVERRIDE("_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp8_init_remote);
 HOST_OVERRIDE("_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp9_init_remote);
 HOST_OVERRIDE("_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj", ov_vp9_props_sdk22);
 HOST_OVERRIDE("_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj", ov_vp9_props_sdk22);
 HOST_OVERRIDE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj", ov_vp9_props_sdk22);
 HOST_OVERRIDE("_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init);
-HOST_OVERRIDE("_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init);
+HOST_OVERRIDE("_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp8_init);
 HOST_OVERRIDE("_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp9_init);
 HOST_OVERRIDE("_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", ov_pool_init);
 HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_"
