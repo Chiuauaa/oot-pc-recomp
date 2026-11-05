@@ -1,6 +1,7 @@
 // NVN 2 program stage -> the NVN 1 shape the rest of the host takes (gfx_shader.c, vk_exec_draw.c): Eglantine's
 // lowering (runtime/third_party/eglantine, GPL-3.0-or-later) rewrites the Ampere code as Maxwell, laid out as TotK's
 // translator reads it, and a synthetic control block carries the fields the host reads.
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <map>
@@ -75,6 +76,11 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     if (!lowered) {
         rt_log("nvn2: Ampere lowering failed at +%#x: %.*s", lowered.error_offset, (int)lowered.error.size(),
                lowered.error.data());
+        const size_t at = lowered.error_offset / 16;   // the instruction the lowering rejected, as 4 words
+        if (at < native.size() && getenv("OOT_LOWER_DUMP")) {
+            const auto &w = native[at].words;
+            rt_log("nvn2:   instruction %08x %08x %08x %08x (opcode %#x)", w[0], w[1], w[2], w[3], w[0] & 0xfff);
+        }
         return nullptr;
     }
 

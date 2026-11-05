@@ -4,6 +4,7 @@
 // Encoding reference: Mesa NAK sm70_encode.rs (MIT), Copyright 2022 Collabora, Ltd.
 #pragma once
 
+#include <cstdio>
 #include <cstdlib>
 #include <algorithm>
 #include <array>
@@ -2496,12 +2497,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                            dest + 2 > register_limit || second_dest + 2 > register_limit ||
                            (second_dest < dest + 2 && dest < second_dest + 2) ||
                            (insn.words[3] & 0xc00001ffU))) ||
-                (half && (bindless || offsets || per_tap || !insn.Bits(60, 1) || insn.Bits(80, 1) ||
+                (half && (bindless || offsets || !insn.Bits(60, 1) || insn.Bits(80, 1) ||
                           insn.Bits(91, 1) ||
                           (source_b != 255 && source_b >= register_limit) ||
                           mask != 15 || dest >= register_limit || second_dest >= register_limit)) ||
                 (offsets && (bindless || source_b == 255 || (source_a != 255 && source_a >= 245))) ||
-                (per_tap && (bindless || insn.Bits(78, 3) || insn.Bits(91, 1))) ||
+                (per_tap && (bindless || insn.Bits(78, 1) || insn.Bits(80, 1) || insn.Bits(91, 1))) ||
                 insn.Bits(89, 1) || mask == 0 ||
                 (bindless ? (handle >= 246 || insn.Bits(46, 13) || !insn.Bits(91, 1))
                           : (insn.Bits(40, 14) > 0x1fff || binding >= 18 ||
@@ -2523,14 +2524,20 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                         terminal = true;
                         break;
                     }
-                    if (op != 0x326 && op != 0x802 && op != 0x307 && op != 0x421 &&
-                        op != 0xa20 && op != 0xb63 && op != 0x221 && op != 0x823 &&
-                        op != 0x423 && op != 0x223 && op != 0x308 && op != 0x220 && op != 0x820)
-                        return fail(index, "native per-tap gather control-flow proof");
+                    // No computed branch anywhere up to the EXIT (BRX, BRXU); direct BRA, CALL and RET are
+                    // allowed: the offset scan below stops at any instruction a branch can land on.
+                    if (op == 0x949 || op == 0x958)
+                    {
+                        static thread_local char message[64];
+                        std::snprintf(message, sizeof message, "native per-tap gather control-flow proof (opcode %#x)", op);
+                        return fail(index, message);
+                    }
                 }
                 if (!terminal) return fail(index, "native per-tap gather terminal proof");
                 std::array<std::optional<u32>, 2> packed_offsets;
                 for (u32 cursor = index; cursor > 0 && (!packed_offsets[0] || !packed_offsets[1]);) {
+                    // A jump can land on this instruction, so the one before it is not the only way here.
+                    if (control_entries[cursor]) return fail(index, "native per-tap gather offset proof (a jump lands before the offsets)");
                     const auto& definition = code[--cursor];
                     if (definition.Bits(12, 4) == 15) continue;
                     const u32 op = definition.Bits(0, 12), target = definition.Bits(16, 8);
@@ -2547,8 +2554,25 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                         }
                         continue;
                     }
-                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20)
-                        return fail(index, "native per-tap gather offset proof");
+                    // IMAD.MOV.U32 Rd, RZ, RZ, imm is a move of the immediate (see the 0x424 case).
+                    const bool imad_move = op == 0x424 && definition.Bits(12, 4) == 7 &&
+                                           definition.Bits(24, 8) == 255 && definition.words[2] == 0x078e00ffU;
+                    if (imad_move) {
+                        for (u32 i = 0; i < 2; ++i)
+                            if (!packed_offsets[i] && target == source_b + i) packed_offsets[i] = definition.words[1];
+                        continue;
+                    }
+                    if (op != 0x802 && op != 0x307 && op != 0x421 && op != 0xa20) {
+                        // Any other instruction is fine as long as it does not write the offset registers.
+                        const u32 written = write_count(definition).value_or(1);
+                        for (u32 i = 0; i < 2; ++i)
+                            if (!packed_offsets[i] && source_b + i >= target && source_b + i < target + written) {
+                                static thread_local char message[160];
+                                std::snprintf(message, sizeof message, "native per-tap gather offset proof (opcode %#x writes R%u: %08x %08x %08x %08x)", op, source_b + i, definition.words[0], definition.words[1], definition.words[2], definition.words[3]);
+                                return fail(index, message);
+                            }
+                        continue;
+                    }
                     for (u32 i = 0; i < 2; ++i) {
                         if (packed_offsets[i] || target != source_b + i) continue;
                         if (op != 0x802 || definition.Bits(12, 4) != 7 || definition.Bits(24, 8) ||
