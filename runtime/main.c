@@ -253,25 +253,14 @@ static int rtti_name(uint64_t obj, char *out, int n) {
     return i >= 2;
 }
 
-static void crash_handler(const PlatCrash *x) {
-    static volatile int32_t busy;
-    if (plat_xchg32(&busy, 1)) plat_exit(71);
+// The function flight recorder's report (TOTK_FNTRACE=1): the whole ring of the calling thread to fntrace.txt (TOTK_FNTRACE_FILE
+// names another file) and its last 300 entries to the log. Called by the crash handler and by rt_fatal.
+void rt_fn_trace_dump(void) {
+    static volatile int32_t done;
+    if (!g_fnprof || plat_xchg32(&done, 1)) return;
     char d[160];
-    uintptr_t rip = x->rip;
-    rt_logf("FATAL: %s (%#x) at host %p (totk+%#llx)", x->what, x->code, (void *)rip, (unsigned long long)x->offset);
-    if (x->access >= 0)
-        rt_logf(", %s address %#llx", x->access == 1 ? "writing" : x->access == 8 ? "executing" : "reading",
-                (unsigned long long)x->addr);
-    rt_log_raw("\n", 1);
-    uint64_t f = lifted_function(rip);
-    if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
-    for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it
-        uint64_t g = lifted_function(x->frames[i]);
-        rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));
-        if (g) rt_logf(" in lifted function f_%llx", (unsigned long long)g);
-        rt_log_raw("\n", 1);
-    }
-    if (g_fnprof) {   // the whole ring to fntrace.txt (TOTK_FNTRACE_FILE names another file), for searching by object
+    (void)d;
+    {   // the whole ring to fntrace.txt (TOTK_FNTRACE_FILE names another file), for searching by object
         const char *path = cfg_get("TOTK_FNTRACE_FILE");
         FILE *ff = fopen(path && *path ? path : "fntrace.txt", "w");
         if (ff) {
@@ -294,6 +283,27 @@ static void crash_handler(const PlatCrash *x) {
                     (unsigned long long)r->x0);
         }
     }
+}
+
+static void crash_handler(const PlatCrash *x) {
+    static volatile int32_t busy;
+    if (plat_xchg32(&busy, 1)) plat_exit(71);
+    char d[160];
+    uintptr_t rip = x->rip;
+    rt_logf("FATAL: %s (%#x) at host %p (totk+%#llx)", x->what, x->code, (void *)rip, (unsigned long long)x->offset);
+    if (x->access >= 0)
+        rt_logf(", %s address %#llx", x->access == 1 ? "writing" : x->access == 8 ? "executing" : "reading",
+                (unsigned long long)x->addr);
+    rt_log_raw("\n", 1);
+    uint64_t f = lifted_function(rip);
+    if (f) rt_logf("  in lifted function f_%llx = %s\n", (unsigned long long)f, ldr_describe(f, d, sizeof d));
+    for (int i = 0; i < x->nframes; i++) {   // abort and invalid parameter: where the host code called it
+        uint64_t g = lifted_function(x->frames[i]);
+        rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));
+        if (g) rt_logf(" in lifted function f_%llx", (unsigned long long)g);
+        rt_log_raw("\n", 1);
+    }
+    rt_fn_trace_dump();
     Cpu *c = kern_cpu();
     if (c) {
         for (int i = 0; i < 31; i++)

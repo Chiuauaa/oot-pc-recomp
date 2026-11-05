@@ -47,6 +47,9 @@ struct IpcSession {
     void *state;
     void (*close)(void *state);
     int32_t refs;
+    // CMIF domain (ConvertCurrentObjectToDomain): object id -> session. Id 1 is this session itself (stored as NULL); the
+    // table holds one reference on each child and is released with the domain. NULL objs = not a domain.
+    struct IpcSession **objs;
 };
 
 uint32_t ipc_session_new(const char *name, IpcHandler handler, void *state, void (*close)(void *state));   // handle

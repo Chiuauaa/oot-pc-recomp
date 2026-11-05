@@ -305,6 +305,60 @@ static void ov_aoc_list(Cpu *c) {
     if (offset < 0 || count < 0) rt_fatal("aoc: ListAddOnContent range %d+%d", offset, count);
     ret_x(c, 0);
 }
+// nn::oe functions of SDK 22 the host answers with nothing: setters and notifications that have no effect on a PC window,
+// and the Is*/Get* queries whose honest answer here is "no" or 0. Left out on purpose: ExitApplication, RestartProgram and
+// the RequestTo* family, which must end or restart the process.
+static void ov_oe_zero(Cpu *c) { ret_x(c, 0); }
+
+// void GetDisplayVersion(DisplayVersion *out): char[16], the version the title shows
+static void ov_oe_display_version(Cpu *c) {
+    char *out = arg_p(c, 0);
+    if (out) { memset(out, 0, 16); memcpy(out, "1.1.1", 5); }
+}
+// void GetDeviceNickName(DeviceNickName *out): char[0x80]
+static void ov_oe_device_nickname(Cpu *c) {
+    char *out = arg_p(c, 0);
+    if (out) { memset(out, 0, 0x80); memcpy(out, "Switch 2", 8); }
+}
+// void GetPseudoDeviceId(Uuid *out): a fixed id, the host has no console
+static void ov_oe_pseudo_device_id(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) for (int i = 0; i < 16; i++) out[i] = (uint8_t)(0xA0 + i);
+}
+static void ov_oe_region_code(Cpu *c) { ret_x(c, 1); }              // RegionCode::Usa
+static void ov_oe_previous_program_index(Cpu *c) { ret_x(c, (uint32_t)-1); }   // none
+// void GetDefaultDisplayResolution(int *width, int *height): the docked 1080p panel the game was told it has
+static void ov_oe_display_resolution(Cpu *c) {
+    int32_t *w = arg_p(c, 0), *h = arg_p(c, 1);
+    if (w) *w = 1920;
+    if (h) *h = 1080;
+}
+
+// nn::nifm: the host is offline. Initialization has nothing to open, and every query for a network answers "none".
+static void ov_nifm_nothing(Cpu *c) { ret_x(c, 0); }
+
+// nn::socket: offline too. Initialization succeeds without opening bsd:s; nothing can be sent, so sockets fail later on their
+// own when asked for (the SDK reports what the missing service returns).
+static void ov_socket_initialized(Cpu *c) { ret_x(c, 1); }
+
+// The socket calls themselves: with no network they fail the way a socket call does, -1 in the whole of x0 (int and ssize_t)
+static void ov_socket_fail(Cpu *c) { ret_x(c, ~0ull); }
+
+// nn::nsd GetEnvironmentIdentifier(EnvironmentIdentifier *out): char[8], the server environment; "lp1" is production. The
+// detail::ipc form asks the nsd:a service, which the host does not run.
+static void ov_nsd_environment(Cpu *c) {
+    char *out = arg_p(c, 0);
+    if (out) { memset(out, 0, 8); memcpy(out, "lp1", 3); }
+    ret_x(c, 0);
+}
+
+// Result detail::ipc::IsChangeEnvironmentIdentifierDisabled(bool *out): changing the environment is disabled
+static void ov_nsd_change_disabled(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) *out = 1;
+    ret_x(c, 0);
+}
+
 // int CountAddOnContent(): the SDK's own definition talks to the aoc service through a session the host does not open
 // (a null session read in OoT 1.1.1). No add-on content, so none to count, nothing to finalize or report.
 static void ov_aoc_count(Cpu *c) { ret_x(c, 0); }
@@ -864,6 +918,149 @@ HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
 
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);
 HOST_OVERRIDE("_ZN2nn3aoc10InitializeEv", ov_aoc_initialize);
+// Online modules the title brings up at start: offline, their Initialize/Finalize succeed without opening a service.
+HOST_OVERRIDE("_ZN2nn3ssl10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3ssl8FinalizeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn7friends10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4bcat10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3ldn10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3ldn8FinalizeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn5prepo10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3nfc10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3nfc8FinalizeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket10InitializeEPvmmi", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket10InitializeERKNS0_6ConfigE", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket8FinalizeEi", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket8FinalizeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket13IsInitializedEv", ov_socket_initialized);
+HOST_OVERRIDE("_ZN2nn3nsd24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", ov_nsd_environment);
+HOST_OVERRIDE("_ZN2nn3nsd33EnableChangeEnvironmentIdentifierEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3nsd34DisableChangeEnvironmentIdentifierEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3nsd37IsChangeEnvironmentIdentifierDisabledEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn3nsd6detail3ipc24GetEnvironmentIdentifierEPNS0_21EnvironmentIdentifierE", ov_nsd_environment);
+HOST_OVERRIDE("_ZN2nn3nsd6detail3ipc37IsChangeEnvironmentIdentifierDisabledEPb", ov_nsd_change_disabled);
+HOST_OVERRIDE("_ZN2nn3nsd6detail3ipc38SetChangeEnvironmentIdentifierDisabledEb", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetSockNameEiPNS0_8SockAddrEPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7ConnectEiPKNS0_8SockAddrEj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket13GetHostByAddrEPKvjiPKNS0_14ResolverOptionEm", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket10SockAtMarkEi", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetPeerNameEiP8sockaddrPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7SendMsgEiPKNS0_6MsgHdrENS0_7MsgFlagE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket13GetHostByAddrEPKvji", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6ListenEii", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7SendMsgEiPK6msghdri", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket10SetSockOptEiiiPKvj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7ConnectEiPK8sockaddrj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetPeerNameEiPNS0_8SockAddrEPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_PKNS0_14ResolverOptionEm", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket12SocketExemptENS0_6FamilyENS0_4TypeENS0_8ProtocolE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4BindEiPK8sockaddrj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6AcceptEiP8sockaddrPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket8ShutdownEii", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SocketEiii", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetSockNameEiP8sockaddrPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7RecvMsgEiPNS0_6MsgHdrENS0_7MsgFlagE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4SendEiPKvmi", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket10GetSockOptEiiiPvPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket13GetHostByNameEPKc", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket8ShutdownEiNS0_14ShutdownMethodE", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket6AcceptEiPNS0_8SockAddrEPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket7RecvMsgEiP6msghdri", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket4RecvEiPvmi", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket13GetHostByNameEPKcPKNS0_14ResolverOptionEm", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_PKNS0_14ResolverOptionEm", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket12SocketExemptEiii", ov_socket_fail);
+HOST_OVERRIDE("_ZN2nn6socket8resolver16InitializeClientEj", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn6socket8resolver14FinalizeClientEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm28IsAnyInternetRequestAcceptedENS0_8ClientIdE", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm21IsIpAddressConflictedEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm18IsNetworkAvailableEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm19SetLocalNetworkModeEb", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm10InitializeEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm20CancelNetworkRequestEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm11GetClientIdEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn4nifm20SubmitNetworkRequestEv", ov_nifm_nothing);
+HOST_OVERRIDE("_ZN2nn2oe16InitializeAppletEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe17EnableCrashReportEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe18DisableCrashReportEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe16EnableScreenShotEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe17DisableScreenShotEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe13MuteRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe15UnmuteRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe15EnableRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe16DisableRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe18ReportUserIsActiveEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe26ReportUserIsActiveInternalEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe20SetAudioOutputPolicyENS0_17AudioOutputPolicyE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe20SetupGpuErrorHandlerEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe22SetCopyrightVisibilityEb", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe21SetExpectedThemeColorENS0_14ThemeColorTypeE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe23BeginBlockingHomeButtonEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe21EndBlockingHomeButtonEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe29BeginAutoSleepDisabledSectionEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe27EndAutoSleepDisabledSectionEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe26SetGraphicsTargetFrameRateEi", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe30SetGraphicsTargetFrameRateAutoEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe23SetWirelessPriorityModeENS0_20WirelessPriorityModeE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe27SetTvPowerStateMatchingModeENS0_24TvPowerStateMatchingModeE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe25BeginMediaPlaybackSectionEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe23EndMediaPlaybackSectionEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe33EnableAlbumImageTakenNotificationEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe34DisableAlbumImageTakenNotificationEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe35EnableStartupLogoDisappearedMessageEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe31SetRtcModeChangedMessageEnabledEb", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe22SetCpuOverclockEnabledEb", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe29SetScreenShotImageOrientationENS_5album16ImageOrientationE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe38SetHidInputMagnificationForApplicationERKNS0_10LayoutRectE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe20NotifyRunningForTestEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe33SuppressDisablingSleepTemporarilyENS_8TimeSpanE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe29SetDelayTimeToAbortOnGpuErrorENS_8TimeSpanE", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe34EnableAllThreadDumpOnCrashForDebugEb", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe19SetGpuQuotaForDebugEj", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe21ClearGpuQuotaForDebugEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe22SetScreenRatioForDebugEjj", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe24ClearScreenRatioForDebugEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe20SwitchLcdBacklightOnEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe21SwitchLcdBacklightOffEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe23EnableGamePlayRecordingEPvm", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe22PauseGamePlayRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe24RestartGamePlayRecordingEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe30InitializeCopyrightFrameBufferEPvm", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe27SetPerformanceConfigurationEi", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe14IsSleepEnabledEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe19IsAutoSleepDisabledEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe21IsCpuOverclockEnabledEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe26IsLanguageSelectionLimitedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe27IsApplicationLicenseLimitedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe28IsGamePlayRecordingSupportedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe26IsDisablingSleepSuppressedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe19IsTensorRtSupportedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe37IsUserInactivityDetectionTimeExtendedEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe24GetServerEnvironmentTypeEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe26GetHdcpAuthenticationStateEv", ov_oe_zero);
+HOST_OVERRIDE("_ZN2nn2oe17GetDisplayVersionEPNS0_14DisplayVersionE", ov_oe_display_version);
+HOST_OVERRIDE("_ZN2nn2oe17GetDeviceNickNameEPNS0_14DeviceNickNameE", ov_oe_device_nickname);
+HOST_OVERRIDE("_ZN2nn2oe17GetPseudoDeviceIdEPNS_4util4UuidE", ov_oe_pseudo_device_id);
+HOST_OVERRIDE("_ZN2nn2oe13GetRegionCodeEv", ov_oe_region_code);
+HOST_OVERRIDE("_ZN2nn2oe23GetPreviousProgramIndexEv", ov_oe_previous_program_index);
+HOST_OVERRIDE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", ov_oe_display_resolution);
 HOST_OVERRIDE("_ZN2nn3aoc16ListAddOnContentEPiii", ov_aoc_list);
 HOST_OVERRIDE("_ZN2nn3aoc17CountAddOnContentEv", ov_aoc_count);
 HOST_OVERRIDE("_ZN2nn3aoc8FinalizeEv", ov_aoc_finalize);

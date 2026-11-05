@@ -2252,6 +2252,11 @@ void kern_fiber_finalize(Cpu *c) {
 void kern_fiber_switch(Cpu *c) {
     RtThread *t = tcur;
     if (!t) rt_fatal("SwitchToFiber on a host thread");
+    if (!c->x[0]) {   // SwitchToFiber(nullptr): back to the thread's own context, which GetCurrentFiber reports as NULL
+                      // (nn::async::FiberTaskCoordinatorBase saves GetCurrentFiber and returns to it this way)
+        if (t->fiber) fiber_switch_to(t, c, NULL);
+        return;
+    }
     Fiber *to = fiber_find(c->x[0]);
     if (!to) rt_fatal("SwitchToFiber(%#llx): not an initialized fiber", (unsigned long long)c->x[0]);
     if (to == t->fiber) return;

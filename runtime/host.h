@@ -16,6 +16,7 @@
 #include "dispatch.h"
 
 // ---- logging and results
+void rt_fn_trace_dump(void);   // TOTK_FNTRACE=1: the function flight recorder's report (main.c)
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // "[host] <msg>\n" to the log, one write
 // The log is stderr plus, in a game run whose stderr is not a file, logs\totk.log next to totk.exe (main.c log_open).
 // rt_logf and rt_log_raw write to both without the prefix and the newline: crash reports, fatal errors, guest output.

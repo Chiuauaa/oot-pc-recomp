@@ -48,6 +48,22 @@ static const uint8_t *image_map;
 static char image_file[2048];
 static char index_dir[2048];         // the directory of romfs-index.bin: the proof file's default place
 static char mount_name[32];
+// Further names the application's RomFS is mounted under. Every MountRom mounts the same image (the application's own), so a
+// second name is an alias, not a second archive: OoT mounts "content" and then "_npln" for a library of its own.
+enum { MAX_ALIASES = 4 };
+static char aliases[MAX_ALIASES][32];
+
+// The mount name "<mount>:" of path uses (the primary name when none matches, for the callers' error paths).
+static const char *mount_of(const char *path) {
+    if (!path) return mount_name;
+    size_t n = strlen(mount_name);
+    if (n && !strncmp(path, mount_name, n) && path[n] == ':') return mount_name;
+    for (int i = 0; i < MAX_ALIASES; i++) {
+        n = strlen(aliases[i]);
+        if (n && !strncmp(path, aliases[i], n) && path[n] == ':') return aliases[i];
+    }
+    return mount_name;
+}
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint64_t handles[NH];         // file index + 1; 0 is free
 static uint32_t handle_ovl[NH];      // overlay slot + 1 of an open handle, 0 = original
@@ -560,8 +576,10 @@ const char *romfs_overlay(size_t k, const char **file, uint64_t *size, int *is_a
 }
 
 int romfs_owns(const char *path) {
-    size_t n = strlen(mount_name);
-    return n && path && !strncmp(path, mount_name, n) && path[n] == ':';
+    if (!path || !*mount_name) return 0;
+    const char *m = mount_of(path);
+    size_t n = strlen(m);
+    return n && !strncmp(path, m, n) && path[n] == ':';
 }
 
 int romfs_handle(uint64_t h) { return h > ROMFS_HANDLE_BASE && h < ROMFS_HANDLE_BASE + NH; }
@@ -572,17 +590,30 @@ uint32_t romfs_mount(const char *name) {
         strchr(name, ':'))
         return FS_R_INVALID;
     plat_mutex_lock(&lock);
-    if (*mount_name && strcmp(name, mount_name)) rt_fatal("second RomFS mount %s (%s is mounted)", name, mount_name);
-    strcpy(mount_name, name);
+    int alias = 0;
+    if (*mount_name && strcmp(name, mount_name)) {   // another name for the same image
+        int have = 0, slot = -1;
+        for (int i = 0; i < MAX_ALIASES; i++) {
+            if (!strcmp(aliases[i], name)) have = 1;
+            else if (!*aliases[i] && slot < 0) slot = i;
+        }
+        if (!have) {
+            if (slot < 0) rt_fatal("RomFS mount %s: more than %d names for the RomFS (%s)", name, MAX_ALIASES, mount_name);
+            strcpy(aliases[slot], name);
+        }
+        alias = 1;
+    } else {
+        strcpy(mount_name, name);
+    }
     plat_mutex_unlock(&lock);
-    rt_log("fs mount %s: -> RomFS", name);
+    rt_log("fs mount %s: -> RomFS%s", name, alias ? " (another name for the same image)" : "");
     return 0;
 }
 
 uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     fs_trace("rom", path);
     if (!out || mode != FS_OPEN_READ) return FS_R_UNSUPPORTED_OPEN;
-    const char *p = romfs_path_relative(mount_name, path);
+    const char *p = romfs_path_relative(mount_of(path), path);
     if (!p) return FS_R_PATH_NOT_FOUND;
     uint64_t i = file_index(p);
     if (i == UINT64_MAX) return FS_R_PATH_NOT_FOUND;
@@ -679,7 +710,7 @@ void romfs_close(uint64_t h) {
 
 uint32_t romfs_entry_type(int *out, const char *path) {
     if (!out) return FS_R_INVALID;
-    const char *p = romfs_path_relative(mount_name, path);
+    const char *p = romfs_path_relative(mount_of(path), path);
     if (!p) return FS_R_PATH_NOT_FOUND;
     if (file_index(p) != UINT64_MAX) {
         *out = FS_ENTRY_FILE;
@@ -695,7 +726,7 @@ uint32_t romfs_entry_type(int *out, const char *path) {
 }
 
 uint32_t romfs_list(const char *path, int (*add)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
-    const char *p = romfs_path_relative(mount_name, path);
+    const char *p = romfs_path_relative(mount_of(path), path);
     if (!p) return FS_R_PATH_NOT_FOUND;
     char prefix[4096];
     size_t n = strlen(p);
@@ -743,5 +774,7 @@ static void ov_initialize(Cpu *c) {
 }
 
 HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKcPvm", ov_mount_rom);
+// SDK 22 adds MountRom(const char *name): no cache arguments, the host reads the image directly either way
+HOST_OVERRIDE("_ZN2nn2fs8MountRomEPKc", ov_mount_rom);
 HOST_OVERRIDE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", ov_query_cache);
 HOST_OVERRIDE("_ZN2nn2fs24InitializeForApplicationEv", ov_initialize);

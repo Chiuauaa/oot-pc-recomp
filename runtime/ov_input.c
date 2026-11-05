@@ -483,6 +483,44 @@ static void ov_six_states_public(Cpu *c) {
     ret_x(c, (uint64_t)(int64_t)six_fill(arg_p(c, 0), (int)arg_x(c, 1), arg_p(c, 2), "GetSixAxisSensorStates"));
 }
 
+// ---- Ocarina of Time (SDK 22): gyroscope and sensor-fusion settings and the vibration queries the Bananza build never made.
+// The host's six-axis sensor has one fixed behaviour (a gamepad's gyro and accelerometer, or rest), so settings are accepted
+// without effect and queries answer their defaults. Result-returning forms answer 0; void forms ignore x0.
+static void ov_hid_ok(Cpu *c) { ret_x(c, 0); }
+static void ov_hid_true(Cpu *c) { ret_x(c, 1); }
+static void ov_hid_false(Cpu *c) { ret_x(c, 0); }
+// GyroscopeZeroDriftMode GetGyroscopeZeroDriftMode(const SixAxisSensorHandle &): 1 = Standard (Loose 0, Tight 2)
+static void ov_gyro_mode(Cpu *c) { ret_x(c, 1); }
+// Result detail::GetGyroscopeZeroDriftMode(GyroscopeZeroDriftMode *out, SixAxisSensorHandle)
+static void ov_gyro_mode_detail(Cpu *c) {
+    uint32_t *out = arg_p(c, 0);
+    if (out) *out = 1;
+    ret_x(c, 0);
+}
+// Result detail::IsSixAxisSensorAtRest(bool *out, const SixAxisSensorHandle &) and detail::IsSixAxisSensorFusionEnabled
+static void ov_out_true(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) *out = 1;
+    ret_x(c, 0);
+}
+static void ov_out_false(Cpu *c) {
+    uint8_t *out = arg_p(c, 0);
+    if (out) *out = 0;
+    ret_x(c, 0);
+}
+// [Result detail::]GetSixAxisSensorFusionParameters(float *revise_power, float *revise_range, const SixAxisSensorHandle &)
+static void ov_fusion_params(Cpu *c) {
+    float *power = arg_p(c, 0), *range = arg_p(c, 1);
+    if (power) *power = 0.03f;
+    if (range) *range = 0.4f;
+    ret_x(c, 0);
+}
+// void GetActualVibrationValue(VibrationValue *out, const VibrationDeviceHandle &): neutral, nothing is playing
+static void ov_actual_vibration_public(Cpu *c) {
+    VibrationValue *out = arg_p(c, 0);
+    if (out) *out = vib_neutral;
+}
+
 // void InitializeTouchScreen(): there is no touch screen on the host
 static void ov_touch_init(Cpu *c) {
     static volatile int32_t logged;
@@ -550,6 +588,33 @@ HOST_OVERRIDE("_ZN2nn3hid6detail24IsVibrationDeviceMountedEPbRKNS0_21VibrationDe
 HOST_OVERRIDE("_ZN2nn3hid6detail20IsVibrationPermittedEPb", ov_vib_permitted);
 HOST_OVERRIDE("_ZN2nn3hid6detail15PermitVibrationEb", ov_vib_permit);
 HOST_OVERRIDE("_ZN2nn3hid6detail18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", ov_six_start);
+HOST_OVERRIDE("_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid25GetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleE", ov_gyro_mode);
+HOST_OVERRIDE("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", ov_hid_true);
+HOST_OVERRIDE("_ZN2nn3hid25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid28IsSixAxisSensorFusionEnabledERKNS0_19SixAxisSensorHandleE", ov_hid_false);
+HOST_OVERRIDE("_ZN2nn3hid32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid32GetSixAxisSensorFusionParametersEPfS1_RKNS0_19SixAxisSensorHandleE", ov_fusion_params);
+HOST_OVERRIDE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", ov_six_stop);
+HOST_OVERRIDE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", ov_six_state);
+HOST_OVERRIDE("_ZN2nn3hid6detail25SetGyroscopeZeroDriftModeENS0_19SixAxisSensorHandleENS0_22GyroscopeZeroDriftModeE", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid6detail25GetGyroscopeZeroDriftModeEPNS0_22GyroscopeZeroDriftModeENS0_19SixAxisSensorHandleE", ov_gyro_mode_detail);
+HOST_OVERRIDE("_ZN2nn3hid6detail27ResetGyroscopeZeroDriftModeENS0_19SixAxisSensorHandleE", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid6detail21IsSixAxisSensorAtRestEPbRKNS0_19SixAxisSensorHandleE", ov_out_true);
+HOST_OVERRIDE("_ZN2nn3hid6detail25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid6detail28IsSixAxisSensorFusionEnabledEPbRKNS0_19SixAxisSensorHandleE", ov_out_false);
+HOST_OVERRIDE("_ZN2nn3hid6detail32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid6detail32GetSixAxisSensorFusionParametersEPfS2_RKNS0_19SixAxisSensorHandleE", ov_fusion_params);
+HOST_OVERRIDE("_ZN2nn3hid6detail34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid20IsVibrationPermittedEv", ov_hid_true);
+HOST_OVERRIDE("_ZN2nn3hid24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", ov_hid_true);
+HOST_OVERRIDE("_ZN2nn3hid29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", ov_hid_true);
+HOST_OVERRIDE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", ov_actual_vibration_public);
+HOST_OVERRIDE("_ZN2nn3hid27BeginForcedVibrationSessionEv", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid25EndForcedVibrationSessionEv", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid31EnableVibrationNxCompatibleModeEv", ov_hid_ok);
+HOST_OVERRIDE("_ZN2nn3hid32DisableVibrationNxCompatibleModeEv", ov_hid_ok);
 HOST_OVERRIDE("_ZN2nn3hid6detail17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", ov_six_stop);
 HOST_OVERRIDE("_ZN2nn3hid6detail22GetSixAxisSensorStatesEPiPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE",
               ov_six_states);

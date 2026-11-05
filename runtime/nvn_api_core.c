@@ -185,6 +185,9 @@ static const int devinfo[] = {   // Tegra X1 values (nnheaders nvn_DeviceConstan
     [0x4E] = 1024, [0x4F] = 32, [0x50] = 4096, [0x51] = 65536, [0x52] = 65536, [0x53] = 256, [0x54] = 16384,
     [0x55] = 262144, [0x56] = 4096, [0x57] = 1, [0x58] = 4, [0x59] = 2, [0x5A] = 0, [0x5B] = 4096, [0x5C] = 16384,
     [0x5D] = 4096, [0x5E] = 128, [0x5F] = 4096,   // 0x5F (separate sampler bindings) from the sampler pool limit, unverified
+    // NVN 2 (Ocarina of Time). 0x67: the game's texture-parsing code aborts when it reads 0 and carries on with 1 or more; what
+    // it stands for is not known (1 keeps the least capable choice). 0x60-0x66 are asked for by no title seen so far.
+    [0x60] = 0, [0x61] = 0, [0x62] = 0, [0x63] = 0, [0x64] = 0, [0x65] = 0, [0x66] = 0, [0x67] = 1,
 };
 
 // void nvnDeviceBuilderSetDefaults(NVNdeviceBuilder *b)
@@ -207,7 +210,18 @@ NVN_API(nvnDeviceFinalize) { ((dev_t_ *)arg_p(c, 0))->magic = 0; }
 NVN_API(nvnDeviceGetInteger) {
     unsigned w = (unsigned)arg_x(c, 1);
     int *out = arg_p(c, 2);
-    if (w >= sizeof devinfo / sizeof *devinfo) rt_fatal("nvn: unsupported NVN device property %#x", w);
+    if (w >= sizeof devinfo / sizeof *devinfo) {
+        // NVN 2 properties past the table (Ocarina of Time asks for 0x67): their meaning is not known here, and 0 is what a
+        // property of a feature the device lacks reads as. Each id is logged once, so a run lists them.
+        static volatile uint64_t seen[4];
+        if (w < 256 && !(__atomic_fetch_or(&seen[w >> 6], 1ull << (w & 63), __ATOMIC_RELAXED) & (1ull << (w & 63))))
+            rt_log("nvn: device property %#x is not in the table: answering 0 (TOTK_NVN_PROP_%X sets another value)", w, w);
+        char key[32];
+        snprintf(key, sizeof key, "TOTK_NVN_PROP_%X", w);
+        const char *v = cfg_get(key);
+        *out = v && *v ? (int)strtol(v, NULL, 0) : 0;
+        return;
+    }
     *out = devinfo[w];
     NVN_LOG("DeviceGetInteger %#x -> %d", w, *out);
 }
@@ -491,6 +505,21 @@ NVN_API(nvnSyncWait) {
     }
     if (ok) b->cpu_synced(s->fence);
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
+}
+// void nvnQueueWaitSync(NVNqueue *q, const NVNsync *s): later work of the queue waits for the sync. The host replays one
+// queue in order, so a sync fenced on it is already behind; one fenced elsewhere is waited for here, with no timeout, and an
+// unfenced one (or a finalized one) holds nothing back.
+NVN_API(nvnQueueWaitSync) {
+    const sync_t *s = arg_p(c, 1);
+    if (!s || s->magic != SYNC_MAGIC || !s->fenced) return;
+    const GfxBackend *b = gfx_backend();
+    if (b->fence_done() >= s->fence) return;
+    int ok;
+    {
+        NVN_BLOCKING();
+        ok = b->fence_wait(s->fence, UINT64_MAX);
+    }
+    if (ok) b->cpu_synced(s->fence);
 }
 // void nvnEventBuilderSetDefaults(NVNeventBuilder *b)
 NVN_API(nvnEventBuilderSetDefaults) { memset(arg_p(c, 0), 0, sizeof(ev_builder_t)); }

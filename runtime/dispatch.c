@@ -49,6 +49,7 @@ void rt_fatal(const char *fmt, ...) {
     va_end(ap);
     // A failed allocation (malloc, realloc, VirtualAlloc) means the commit limit was reached: this line tells a leak of
     // ours (process private bytes near the limit) from a machine short of page file.
+    rt_fn_trace_dump();   // the function flight recorder, when on
     double proc, used, limit;
     plat_commit_info(&proc, &used, &limit);
     rt_log("fatal: memory commit: this process %.0f MB, the system %.0f of %.0f MB", proc, used, limit);

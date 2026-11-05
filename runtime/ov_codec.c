@@ -160,7 +160,8 @@ static int decode_into(Dec *d, Slot *s, const uint8_t *data, size_t size, int64_
 static void ov_video_init(Cpu *c) { ret_x(c, 0); }
 static void ov_video_fini(Cpu *c) { ret_x(c, 0); }
 
-static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) {
+// host_decoder 0: the codec has no host decoder (AV1, VP8 here), the decoder takes packets and answers with black pictures
+static void codec_init(Cpu *c, uint64_t key, unsigned w, unsigned h, int host_decoder, const char *name) {
     plat_mutex_lock(&lock);
     Dec *d = dec_of(key);
     if (!d) d = dec_of(0);
@@ -172,16 +173,28 @@ static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) {
     memset(d, 0, sizeof *d);
     d->key = key;
     vpx_codec_dec_cfg_t cfg = {.threads = 2, .w = w, .h = h};
-    d->vpx_ok = vpx_codec_dec_init(&d->vpx, vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
+    d->vpx_ok = host_decoder && vpx_codec_dec_init(&d->vpx, vpx_codec_vp9_dx(), &cfg, 0) == VPX_CODEC_OK;
     plat_mutex_unlock(&lock);
-    rt_log("codec: VP9 decoder %#llx %ux%u on the host (libvpx%s)", (unsigned long long)key, w, h,
-           d->vpx_ok ? "" : " failed to start: pictures stay black");
+    if (host_decoder)
+        rt_log("codec: %s decoder %#llx %ux%u on the host (libvpx%s)", name, (unsigned long long)key, w, h,
+               d->vpx_ok ? "" : " failed to start: pictures stay black");
+    else
+        rt_log("codec: %s decoder %#llx %ux%u: the host has no %s decoder yet, pictures stay black", name,
+               (unsigned long long)key, w, h, name);
     ret_x(c, 0);
 }
+static void vp9_init(Cpu *c, uint64_t key, unsigned w, unsigned h) { codec_init(c, key, w, h, 1, "VP9"); }
 // Result InitializeVp9Decoder(Vp9DecoderType *, void *work, size_t, size_t, u16 w, u16 h, u32, input, output fmt)
 static void ov_vp9_init(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff); }
 // Result InitializeVp9Decoder(Vp9DecoderType *, size_t, size_t, u16 w, u16 h, u32, input, output fmt)
 static void ov_vp9_init_nowork(Cpu *c) { vp9_init(c, arg_x(c, 0), arg_x(c, 3) & 0xffff, arg_x(c, 4) & 0xffff); }
+
+// SDK 22 (Ocarina of Time): InitializeXDecoderByTransferMemory(XDecoderType *, void *memory, size_t, size_t, u16 w, u16 h, u32,
+// input, output, mode) has the argument order of InitializeVp9Decoder; ...ByRemoteMemory(XDecoderType *, u64 memory, u16 w,
+// u16 h, u32, ...) takes the remote memory in place of the work buffer.
+static void ov_av1_init(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 4) & 0xffff, arg_x(c, 5) & 0xffff, 0, "AV1/VP8"); }
+static void ov_vp9_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, 1, "VP9"); }
+static void ov_av1_init_remote(Cpu *c) { codec_init(c, arg_x(c, 0), arg_x(c, 2) & 0xffff, arg_x(c, 3) & 0xffff, 0, "AV1/VP8"); }
 
 // Result FinalizeVp9Decoder(Vp9DecoderType *)
 static void ov_vp9_fini(Cpu *c) {
@@ -384,6 +397,33 @@ static void ov_vp9_props(Cpu *c) {
     ret_x(c, d ? 0 : R_NOT_READY);
 }
 
+// SDK 22: Result GetXDecoderOutputBufferProperties(u16 *w, u16 *h, u16 *, u16 *, TimeSpan *pts, bool *end, XDecoderType *,
+// u32 index): no ColorSpace in front of the time stamp, so everything after the four sizes moves up one argument.
+static void ov_vp9_props_sdk22(Cpu *c) {
+    uint32_t i = (uint32_t)arg_x(c, 7);
+    plat_mutex_lock(&lock);
+    Dec *d = dec_of(arg_x(c, 6));
+    Slot s = d && i < SLOTS ? d->slot[i] : (Slot){0};
+    plat_mutex_unlock(&lock);
+    for (int k = 0; k < 4; k++) {
+        uint16_t *p = arg_p(c, k);
+        if (p) *p = k & 1 ? s.h : s.w;
+    }
+    LOG_FIRST("codec: output properties: %ux%u", s.w, s.h);
+    if (arg_p(c, 4)) *(int64_t *)arg_p(c, 4) = s.pts;
+    if (arg_p(c, 5)) *(uint8_t *)arg_p(c, 5) = (uint8_t)s.eos;
+    ret_x(c, d ? 0 : R_NOT_READY);
+}
+
+// SDK 22: nn::os::SystemEventType *GetXDecoderSubmissionReadyEvent(XDecoderType *): the event comes back in x0
+static void ov_vp9_ready_event_sdk22(Cpu *c) {
+    uint64_t dec = arg_x(c, 0);
+    uint64_t ev = event_for(c, dec);
+    kern_signal_system_event(ev);
+    TRACE("submission-ready event %#llx handed out (signalled)", (unsigned long long)ev);
+    ret_x(c, ev);
+}
+
 // Result ReadDecoderOutputImageNv12(const VideoDecoderImagePoolType *, u32 image, u16 x, u16 y, u16 w, u16 h,
 // void *luma, size_t luma_pitch, size_t luma_size, void *chroma, size_t chroma_pitch, size_t chroma_size)
 static void ov_read_nv12(Cpu *c) {
@@ -486,11 +526,48 @@ static void ov_sp_cancel(Cpu *c) {
     plat_mutex_unlock(&lock);
     clear_event(c, ev);
 }
+// SDK 22 also waits on a sync point directly. With no GPU behind the handle every sync point is already reached (as the event
+// variants above signal at once): the waits return at once, TryWait and TimedWait report "reached".
+static void ov_sp_wait_now(Cpu *c) { ret_x(c, 1); }
+static void ov_sp_init(Cpu *c) { ret_x(c, 0); }
 // void DestroySyncPointEvent(SyncPointEventType *): the event stays bound for the next Create on the same object
 static void ov_sp_nop(Cpu *c) { (void)c; }
 
 HOST_OVERRIDE("_ZN2nn5codec5video10InitializeEv", ov_video_init);
 HOST_OVERRIDE("_ZN2nn5codec5video8FinalizeEv", ov_video_fini);
+// SDK 22 names (Ocarina of Time): the same routines, for VP9, and for VP8 and AV1 without a host decoder
+HOST_OVERRIDE("_ZN2nn5codec14StopAv1DecoderEPNS0_14Av1DecoderTypeE", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec14StopVp8DecoderEPNS0_14Vp8DecoderTypeE", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec15FlushAv1DecoderEPNS0_14Av1DecoderTypeE", ov_vp9_flush);
+HOST_OVERRIDE("_ZN2nn5codec15FlushVp8DecoderEPNS0_14Vp8DecoderTypeE", ov_vp9_flush);
+HOST_OVERRIDE("_ZN2nn5codec15StartAv1DecoderEPNS0_14Av1DecoderTypeE", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec15StartVp8DecoderEPNS0_14Vp8DecoderTypeE", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec18FinalizeAv1DecoderEPNS0_14Av1DecoderTypeE", ov_vp9_fini);
+HOST_OVERRIDE("_ZN2nn5codec18FinalizeVp8DecoderEPNS0_14Vp8DecoderTypeE", ov_vp9_fini);
+HOST_OVERRIDE("_ZN2nn5codec24RegisterAv1DecoderBufferEPNS0_14Av1DecoderTypeEjPNS0_25VideoDecoderImagePoolTypeEj", ov_vp9_register);
+HOST_OVERRIDE("_ZN2nn5codec24RegisterVp8DecoderBufferEPNS0_14Vp8DecoderTypeEjPNS0_25VideoDecoderImagePoolTypeEj", ov_vp9_register);
+HOST_OVERRIDE("_ZN2nn5codec26UnregisterAv1DecoderBufferEPNS0_14Av1DecoderTypeEj", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec26UnregisterVp8DecoderBufferEPNS0_14Vp8DecoderTypeEj", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec26UnregisterVp9DecoderBufferEPNS0_14Vp9DecoderTypeEj", ov_ok);
+HOST_OVERRIDE("_ZN2nn5codec27SubmitAv1DecoderInputBufferEPmPNS0_14Av1DecoderTypeEPKvmNS_8TimeSpanEb", ov_vp9_submit);
+HOST_OVERRIDE("_ZN2nn5codec27SubmitVp8DecoderInputBufferEPmPNS0_14Vp8DecoderTypeEPKvmNS_8TimeSpanEb", ov_vp9_submit);
+HOST_OVERRIDE("_ZN2nn5codec29AcquireAv1DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_14Av1DecoderTypeE", ov_vp9_acquire);
+HOST_OVERRIDE("_ZN2nn5codec29AcquireVp8DecoderOutputBufferEPjPNS_2gs16NativeSyncHandleEPNS0_14Vp8DecoderTypeE", ov_vp9_acquire);
+HOST_OVERRIDE("_ZN2nn5codec29ReleaseAv1DecoderOutputBufferEPNS0_14Av1DecoderTypeEjNS_2gs16NativeSyncHandleE", ov_vp9_release);
+HOST_OVERRIDE("_ZN2nn5codec29ReleaseVp8DecoderOutputBufferEPNS0_14Vp8DecoderTypeEjNS_2gs16NativeSyncHandleE", ov_vp9_release);
+HOST_OVERRIDE("_ZN2nn5codec33GetAv1DecoderSubmissionReadyEventEPNS0_14Av1DecoderTypeE", ov_vp9_ready_event_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec33GetVp8DecoderSubmissionReadyEventEPNS0_14Vp8DecoderTypeE", ov_vp9_ready_event_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec33GetVp9DecoderSubmissionReadyEventEPNS0_14Vp9DecoderTypeE", ov_vp9_ready_event_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec34InitializeAv1DecoderByRemoteMemoryEPNS0_14Av1DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init_remote);
+HOST_OVERRIDE("_ZN2nn5codec34InitializeVp8DecoderByRemoteMemoryEPNS0_14Vp8DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init_remote);
+HOST_OVERRIDE("_ZN2nn5codec34InitializeVp9DecoderByRemoteMemoryEPNS0_14Vp9DecoderTypeEmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp9_init_remote);
+HOST_OVERRIDE("_ZN2nn5codec35GetAv1DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Av1DecoderTypeEj", ov_vp9_props_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec35GetVp8DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Vp8DecoderTypeEj", ov_vp9_props_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_8TimeSpanEPbPNS0_14Vp9DecoderTypeEj", ov_vp9_props_sdk22);
+HOST_OVERRIDE("_ZN2nn5codec36InitializeAv1DecoderByTransferMemoryEPNS0_14Av1DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init);
+HOST_OVERRIDE("_ZN2nn5codec36InitializeVp8DecoderByTransferMemoryEPNS0_14Vp8DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_av1_init);
+HOST_OVERRIDE("_ZN2nn5codec36InitializeVp9DecoderByTransferMemoryEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_24VideoDecoderOutputFormatENS0_22VideoDecoderOutputModeE", ov_vp9_init);
+HOST_OVERRIDE("_ZN2nn5codec26InitializeDecoderImagePoolEPNS0_25VideoDecoderImagePoolTypeEPvmRKNS0_27VideoDecoderImagePreferenceEj", ov_pool_init);
 HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEPvmmttjNS0_23VideoDecoderInputFormatENS0_"
               "24VideoDecoderOutputFormatE", ov_vp9_init);
 HOST_OVERRIDE("_ZN2nn5codec20InitializeVp9DecoderEPNS0_14Vp9DecoderTypeEmmttjNS0_23VideoDecoderInputFormatENS0_"
@@ -518,6 +595,11 @@ HOST_OVERRIDE("_ZN2nn5codec35GetVp9DecoderOutputBufferPropertiesEPtS1_S1_S1_PNS_
 HOST_OVERRIDE("_ZN2nn5codec26ReadDecoderOutputImageNv12EPKNS0_25VideoDecoderImagePoolTypeEjttttPvmmS4_mm", ov_read_nv12);
 HOST_OVERRIDE("_ZN2nn5codec36GetDecoderImagePoolNativeImageHandleEPKNS0_25VideoDecoderImagePoolTypeEj", ov_pool_image);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk20CreateSyncPointEventEPNS1_18SyncPointEventTypeE", ov_sp_create);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk13WaitSyncPointERKNS1_15SyncPointHandleE", ov_sp_wait_now);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk16TryWaitSyncPointERKNS1_15SyncPointHandleE", ov_sp_wait_now);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk18TimedWaitSyncPointERKNS1_15SyncPointHandleENS_8TimeSpanE", ov_sp_wait_now);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk10InitializeEv", ov_sp_init);
+HOST_OVERRIDE("_ZN2nn6syncpt3sdk12InitializeExEPvmNS1_14LibraryOptionsE", ov_sp_init);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolderTypeEPNS1_18SyncPointEventTypeE",
               ov_sp_holder);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk21TryWaitSyncPointEventEPKNS1_18SyncPointEventTypeE", ov_sp_trywait);
