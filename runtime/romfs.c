@@ -694,6 +694,39 @@ uint32_t romfs_entry_type(int *out, const char *path) {
     return FS_R_PATH_NOT_FOUND;
 }
 
+uint32_t romfs_list(const char *path, int (*add)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
+    const char *p = romfs_path_relative(mount_name, path);
+    if (!p) return FS_R_PATH_NOT_FOUND;
+    char prefix[4096];
+    size_t n = strlen(p);
+    while (n && p[n - 1] == '/') n--;                      // "content:/Foliage/" lists the same folder as "content:/Foliage"
+    if (n + 2 > sizeof prefix) return FS_R_INVALID;
+    memcpy(prefix, p, n);
+    if (n) prefix[n++] = '/';                              // the root has an empty prefix
+    prefix[n] = 0;
+    char last[4096] = "";                                   // the subdirectory added last: its files are contiguous
+    int found = 0;
+    for (uint64_t i = lower(prefix); i < file_count; i++) {
+        Entry e = entry(i);
+        const char *name = entry_name(e);
+        if (strncmp(name, prefix, n)) break;
+        const char *rest = name + n;
+        if (!*rest) continue;
+        found = 1;
+        const char *slash = strchr(rest, '/');
+        if (slash) {
+            size_t k = (size_t)(slash - rest);
+            if (k >= sizeof last) return FS_R_INVALID;
+            if (strlen(last) == k && !strncmp(last, rest, k)) continue;
+            memcpy(last, rest, k), last[k] = 0;
+            if (!add(last, PLAT_FS_DIR, 0, ctx)) return 0;
+        } else if (!add(rest, PLAT_FS_FILE, e.size, ctx)) {
+            return 0;
+        }
+    }
+    return found ? 0 : FS_R_PATH_NOT_FOUND;
+}
+
 // ---- overrides
 // nn::Result nn::fs::MountRom(const char *name, void *cache, size_t cache_size)
 static void ov_mount_rom(Cpu *c) { ret_x(c, romfs_mount(arg_p(c, 0))); }

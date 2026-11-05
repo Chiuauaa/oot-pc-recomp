@@ -34,6 +34,10 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
 uint32_t romfs_size(int64_t *out, uint64_t h);
 void romfs_close(uint64_t h);
 uint32_t romfs_entry_type(int *out, const char *path);
+// Calls add(name, kind, size, ctx) (kind: PLAT_FS_FILE or PLAT_FS_DIR) for each direct child of the RomFS directory path,
+// files first met in path order and each subdirectory once; stops early when add returns 0. FS_R_PATH_NOT_FOUND when no
+// file lies under path. The RomFS keeps no directory objects, only the sorted file paths (an empty folder is invisible).
+uint32_t romfs_list(const char *path, int (*add)(const char *name, int kind, uint64_t size, void *ctx), void *ctx);
 uint64_t romfs_file_count(void);                           // files in the index (fs_init first)
 const char *romfs_entry(uint64_t i, uint64_t *offset, uint64_t *size);   // path, image offset and size of index row i
 const char *romfs_image_path(void);                        // the romfs.bin path fs_init opened

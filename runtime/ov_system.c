@@ -305,6 +305,12 @@ static void ov_aoc_list(Cpu *c) {
     if (offset < 0 || count < 0) rt_fatal("aoc: ListAddOnContent range %d+%d", offset, count);
     ret_x(c, 0);
 }
+// int CountAddOnContent(): the SDK's own definition talks to the aoc service through a session the host does not open
+// (a null session read in OoT 1.1.1). No add-on content, so none to count, nothing to finalize or report.
+static void ov_aoc_count(Cpu *c) { ret_x(c, 0); }
+static void ov_aoc_finalize(Cpu *c) { (void)c; }
+static void ov_aoc_base_id(Cpu *c) { ret_x(c, 0); }
+static void ov_aoc_mount_status(Cpu *c) { ret_x(c, 0); }   // Result 0: nothing is waiting to be mounted
 static void ov_err_context(Cpu *c) { (void)c; rt_log("err: error contexts stay local"); }
 static void ov_pctl_initialize(Cpu *c) { (void)c; rt_log("pctl: no parental controls"); }
 static void ov_abort_observer(Cpu *c) { (void)c; rt_log("diag: the host crash reporter observes aborts"); }
@@ -605,6 +611,28 @@ static void ov_current_time(Cpu *c) {
 // returning the 0x18-byte struct through x8 would write through a stale pointer (time_host.c).
 static void ov_steady_now(Cpu *c) { ret_x(c, (uint64_t)steady_now().value); }
 
+// int GetStandardSteadyClockCurrentTimespec(timespec *) and GetStandardUserSystemClockCurrentTimespec(timespec *): the
+// SDK 22 libc installs them as its clock_gettime for CLOCK_MONOTONIC and CLOCK_REALTIME (sdk+0xaf080, sdk+0xaf13c). Their
+// own definitions ask the time service, which the host does not run, so clock_gettime failed and
+// std::chrono::steady_clock::now() threw std::system_error. 0 means success.
+static void ov_steady_timespec(Cpu *c) {
+    int64_t *ts = arg_p(c, 0);
+    if (!ts) { ret_x(c, 22); return; }   // EINVAL
+    uint64_t ns = plat_now_ns();
+    ts[0] = (int64_t)(ns / 1000000000ull);
+    ts[1] = (int64_t)(ns % 1000000000ull);
+    ret_x(c, 0);
+}
+static void ov_user_timespec(Cpu *c) {
+    int64_t *ts = arg_p(c, 0);
+    if (!ts) { ret_x(c, 22); return; }
+    struct timespec now;
+    if (!timespec_get(&now, TIME_UTC)) { ret_x(c, 5); return; }   // EIO
+    ts[0] = (int64_t)now.tv_sec;
+    ts[1] = (int64_t)now.tv_nsec;
+    ret_x(c, 0);
+}
+
 // Result ToCalendarTime(CalendarTime *out, CalendarAdditionalInfo *info, const PosixTime &t): local time
 static void ov_to_calendar(Cpu *c) {
     CalendarTime *out = arg_p(c, 0);
@@ -837,6 +865,10 @@ HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);
 HOST_OVERRIDE("_ZN2nn3aoc10InitializeEv", ov_aoc_initialize);
 HOST_OVERRIDE("_ZN2nn3aoc16ListAddOnContentEPiii", ov_aoc_list);
+HOST_OVERRIDE("_ZN2nn3aoc17CountAddOnContentEv", ov_aoc_count);
+HOST_OVERRIDE("_ZN2nn3aoc8FinalizeEv", ov_aoc_finalize);
+HOST_OVERRIDE("_ZN2nn3aoc21GetAddOnContentBaseIdEv", ov_aoc_base_id);
+HOST_OVERRIDE("_ZN2nn3aoc28CheckAddOnContentMountStatusEv", ov_aoc_mount_status);
 HOST_OVERRIDE("_ZN2nn3err26InitializeContextWriterApiEv", ov_err_context);
 HOST_OVERRIDE("_ZN2nn4pctl10InitializeEv", ov_pctl_initialize);
 HOST_OVERRIDE("_ZN2nn4diag34InitializeApplicationAbortObserverEv", ov_abort_observer);
@@ -857,6 +889,8 @@ HOST_OVERRIDE("_ZN2nn7account16GetUserExistenceEPbRKNS0_3UidE", ov_user_existenc
 HOST_OVERRIDE("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", ov_nickname);
 
 HOST_OVERRIDE("_ZN2nn4time10InitializeEv", ov_time_initialize);
+HOST_OVERRIDE("_ZN2nn4time37GetStandardSteadyClockCurrentTimespecEP8timespec", ov_steady_timespec);
+HOST_OVERRIDE("_ZN2nn4time41GetStandardUserSystemClockCurrentTimespecEP8timespec", ov_user_timespec);
 HOST_OVERRIDE("_ZN2nn4time8FinalizeEv", ov_time_finalize);
 HOST_OVERRIDE("_ZN2nn4time13IsInitializedEv", ov_time_ready);
 HOST_OVERRIDE("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", ov_current_time);
