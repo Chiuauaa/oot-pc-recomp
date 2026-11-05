@@ -227,7 +227,7 @@ static int bind_pool_memory(VkCtx *c, Tex *e, VkImage img, uint64_t guest_size) 
     if ((e->f.depth || e->f.stencil) && req.size > guest_size) return 0;
     VkMemSpan sp;
     if (!req.size) return 0;   // an image the device could not lay out (image_size)
-    if (!vk_mem_resolve(e->pub.addr, req.size, &sp) || !sp.alloc || sp.alloc_offset % req.alignment) return 0;
+    if (!vk_mem_resolve_existing(e->pub.addr, req.size, &sp) || !sp.alloc || sp.alloc_offset % req.alignment) return 0;
     VmaAllocationInfo info;
     vmaGetAllocationInfo(c->vma, sp.alloc, &info);
     if (!(req.memoryTypeBits >> info.memoryType & 1)) return 0;
@@ -334,9 +334,9 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     // clear colour. Vulkan cannot add the usage later.
     if (!ds && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == 1) usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = ds ? 0 : VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;   // format-reinterpreting views
-    // RGB9E5 has no storage-image format. Ocarina binds an R32_UINT view to write its
-    // packed bits. As in Lichii vk_texture_cache.cpp MakeImage, a compatible view may
-    // supply a usage that the base sampling format cannot support.
+    // RGB9E5 has no storage-image format. Ocarina binds an R32_UINT view to write its packed bits. As in Lichii
+    // vk_texture_cache.cpp MakeImage, a compatible view may supply a usage that the base sampling format cannot support.
+    // (Zuriel-Zurichi, fix/oot-rendering-3d c3ad87b.)
     if (!ds && samples == 1 && f.vk == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 &&
         (features_of(VK_FORMAT_R32_UINT) & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
@@ -1093,12 +1093,13 @@ static Tex *slot_resolve(TexSlot *s, view_t *view, int *has_view) {
         if (!e) e = any ? any : own;
     }
     if (!e) e = s->t.mem ? entry_of(&s->t) : NULL;
-    // Following live storage must preserve the descriptor's interpretation of its
-    // bits, not only its swizzle. Ocarina's RGB9E5 sampler can follow R11G11B10F
-    // storage written through a uint view at the same address.
+    // Following live storage must preserve the descriptor's interpretation of its bits, not only its swizzle.
+    // Ocarina's RGB9E5 sampler follows R11G11B10F storage written through a uint view at the same address; sampled in
+    // the followed image's own format, the world came out in bands of false colour. (Zuriel-Zurichi, c3ad87b.)
     if (e && s->t.d.format != e->t.d.format && !(s->has_view && s->v.set_format)) {
         TexVkFormat mapped;
         if (tex_vk_format(s->t.d.format, &mapped) && vk_color_view_compatible(e->pub.format, mapped.vk)) {
+            if (!*has_view) memset(view, 0, sizeof *view);
             view->format = s->t.d.format;
             view->set_format = 1;
             *has_view = 1;

@@ -1091,7 +1091,35 @@ static void close_directory(uint64_t h) {
 // and ApplicationId are 8-byte structs passed in one register; Uid, ReadOption and WriteOption by reference.
 #define I32(i) ((int32_t)arg_x(c, i))
 #define I64(i) ((int64_t)arg_x(c, i))
-static void ov_open_file(Cpu *c) { ret_x(c, open_file(arg_p(c, 0), arg_p(c, 1), I32(2))); }
+// OOT_FS_REPEAT=1: the guest call stack of the 20th open of one path (a load that is retried forever)
+static void fs_repeat_note(Cpu *c, const char *path) {
+    static int on = -1;
+    if (on < 0) on = getenv("OOT_FS_REPEAT") != NULL;
+    if (!on || !path) return;
+    static struct { uint64_t h; int n; } tab[65536];
+    static PlatMutex tl = PLAT_MUTEX_INIT;
+    uint64_t h = 1469598103934665603ull;
+    for (const char *q = path; *q; q++) h = (h ^ (unsigned char)*q) * 1099511628211ull;
+    plat_mutex_lock(&tl);
+    int n = 0;
+    for (int i = 0; i < 65536; i++) {
+        int k = (int)((h + (uint64_t)i) & 65535);
+        if (!tab[k].h || tab[k].h == h) { tab[k].h = h; n = ++tab[k].n; break; }
+    }
+    plat_mutex_unlock(&tl);
+    if (n != 20) return;
+    char f[128];
+    rt_log("fs repeat: %s opened 20 times; lr %s", path, ldr_describe(c->x[30], f, sizeof f));
+    uint64_t fp = c->x[29];
+    for (int d = 0; d < 24 && fp && !(fp & 7) && plat_mem_readable(fp, 16); d++) {
+        uint64_t ret = *(const uint64_t *)(uintptr_t)(fp + 8), up = *(const uint64_t *)(uintptr_t)fp;
+        if (!ret) break;
+        rt_log("fs repeat:   #%d %s", d, ldr_describe(ret, f, sizeof f));
+        if (up <= fp) break;
+        fp = up;
+    }
+}
+static void ov_open_file(Cpu *c) { fs_repeat_note(c, arg_p(c, 1)); ret_x(c, open_file(arg_p(c, 0), arg_p(c, 1), I32(2))); }
 static void ov_file_size(Cpu *c) { ret_x(c, file_size(arg_p(c, 0), arg_x(c, 1))); }
 static void ov_close_file(Cpu *c) { close_file(arg_x(c, 0)); }
 static void ov_entry_type(Cpu *c) { ret_x(c, entry_type(arg_p(c, 0), arg_p(c, 1))); }

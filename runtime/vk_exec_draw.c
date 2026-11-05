@@ -1036,6 +1036,19 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     uint64_t n = size && size < sp.avail ? size : sp.avail;
     if (n > max) n = max;
     if (!n) return 0;
+    // OOT_BIG_POOL_LOG=1: the first 60 binds that land in a pool with 256 MiB or more past the address, with the size the
+    // game declared (0: none) and the range bound.
+    static int big_log = -1;
+    if (big_log < 0) big_log = cfg_get("OOT_BIG_POOL_LOG") != NULL;
+    if (big_log && sp.avail >= (256ull << 20)) {
+        static int lines;
+        if (lines < 60) {
+            lines++;
+            rt_log("vk: bind in a large pool: addr %#llx size %#llx -> %#llx bound (avail %#llx, use %d, written %d, max %#llx)",
+                   (unsigned long long)addr, (unsigned long long)size, (unsigned long long)n,
+                   (unsigned long long)sp.avail, use, written, (unsigned long long)max);
+        }
+    }
     if (sp.offset % align == 0) {
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
@@ -1313,6 +1326,20 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
     else if (slot >= 0 && slot < 16) b = ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot];
     else if (ubo_ptr_res(r)) up.addr = ubo_ptr(ex, st, r), b = &up;   // size 0: up to the end of the backing
     if (b) {
+        // A storage buffer with no declared size (a guarded NVN 2 candidate read from a root or constant word, or a
+        // pointer out of a uniform buffer) would otherwise be bound up to the end of its pool. In Ocarina of Time a
+        // compute pass binds 0x200000000 that way inside a 2.4 GB CPU-cached pool: 1.4 GB bound as written, so every
+        // submission copied 1.4 GB from the VRAM mirror back to guest memory (~120 ms of PCIe each, 2 fps in the
+        // world). yuzu and Eden cap such bindings the same way (video_core/buffer_cache/buffer_cache.h,
+        // BufferCache::StorageBufferBinding: the mapped size, at most 8 MiB, when the cbuf holds no size); a guarded
+        // access past the cap branches away instead of reading. OOT_SBO_UNSIZED_MB sets the cap (default 8); 0 restores
+        // the old whole-remainder bind.
+        static uint64_t unsized_max = ~0ull;
+        if (unsized_max == ~0ull) {
+            const char *e = cfg_get("OOT_SBO_UNSIZED_MB");
+            unsized_max = e && *e ? (uint64_t)atoll(e) << 20 : 8ull << 20;
+        }
+        if (!ubo && !b->size && unsized_max && max > unsized_max) max = unsized_max;
         // vk_caps.c: shaders translated for sbuf_align address the buffer from its address rounded down to it.
         uint64_t lead = vk_caps.sbuf_align ? b->addr & (vk_caps.sbuf_align - 1) : 0;
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead : 0, align, max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,
@@ -3082,6 +3109,35 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
             if (nvn2_is_tensor((const uint8_t *)(uintptr_t)ex->prog->sd[k].data)) {
                 static int told;
                 if (!told++) rt_log("tensor: the neural upscaler is replaced by a linear blit (OOT_RUN_TENSOR=1 runs it)");
+                static int tlog = -1, tn;
+                if (tlog < 0) tlog = getenv("OOT_TENSOR_LOG") != NULL;
+                if (tlog && tn < 400) {
+                    tn++;
+                    char s[1600];
+                    int o = snprintf(s, sizeof s, "tensor stage %d groups %dx%dx%d:", tn, d->x, d->y, d->z);
+                    vk_texture_lock();
+                    for (int kind = 0; kind < 2; kind++)
+                        for (int slot = 0; slot < (kind ? 32 : 128) && o < (int)sizeof s - 80; slot++) {
+                            uint64_t hh = kind ? ex->img[NVN_STAGE_CS][slot] : ex->tex[NVN_STAGE_CS][slot];
+                            if (!hh) continue;
+                            const VkTexImage *t = vk_texture_by_id_locked(&ex->tex_pool, (int)(hh & 0xfffff), NULL, NULL);
+                            if (t) o += snprintf(s + o, sizeof s - o, " %s%d=%d:%ux%u/f%d", kind ? "img" : "tex", slot, (int)(hh & 0xfffff), t->width, t->height, (int)t->format);
+                        }
+                    vk_texture_unlock();
+                    // only combinations not seen before (the bindings without the stage number and group count)
+                    static uint64_t seen[512];
+                    static int nseen;
+                    const char *b = strchr(s, ':');
+                    uint64_t hv = 1469598103934665603ull;
+                    for (const char *q = b ? b : s; *q; q++) hv = (hv ^ (unsigned char)*q) * 1099511628211ull;
+                    int dup = 0;
+                    for (int q = 0; q < nseen && !dup; q++) dup = seen[q] == hv;
+                    if (dup) tn--;
+                    else {
+                        if (nseen < 512) seen[nseen++] = hv;
+                        rt_log("%s", s);
+                    }
+                }
                 upscale_standin(ex);
                 return;
             }

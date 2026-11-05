@@ -5,6 +5,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/statvfs.h>
 #include <limits.h>
 #include <linux/fs.h>
 #include <linux/futex.h>
@@ -1021,6 +1022,12 @@ int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     return k >= 0 ? k : errno == EFAULT ? -2 : -1;
 }
 
+// The kernel reads the range ahead in large requests: on a spinning disk, a file read in one pass instead of in the
+// game's pieces interleaved with other threads' (each piece a seek).
+void plat_file_prefetch(PlatFile *f, uint64_t off, uint64_t n) {
+    if (n) (void)posix_fadvise(fd_of(f), (off_t)off, (off_t)n, POSIX_FADV_WILLNEED);
+}
+
 int plat_file_id(PlatFile *f, PlatFileId *out) {
     struct stat st;
     if (fstat(fd_of(f), &st)) return 0;
@@ -1045,6 +1052,11 @@ static int fs_err(int e) {
     case EBUSY: case ETXTBSY: return PLAT_FS_BUSY;
     default: return PLAT_FS_ERROR;
     }
+}
+
+uint64_t plat_fs_free_bytes(const char *path) {
+    struct statvfs v;
+    return statvfs(path, &v) ? UINT64_MAX : (uint64_t)v.f_bavail * (uint64_t)v.f_frsize;
 }
 
 int plat_fs_kind(const char *path) {

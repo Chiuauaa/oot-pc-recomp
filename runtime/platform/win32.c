@@ -772,6 +772,13 @@ void plat_file_close(PlatFile *f) {
     if (f) CloseHandle((HANDLE)f);
 }
 
+uint64_t plat_fs_free_bytes(const char *path) {
+    ULARGE_INTEGER a;
+    return GetDiskFreeSpaceExA(path, &a, NULL, NULL) ? (uint64_t)a.QuadPart : UINT64_MAX;
+}
+
+void plat_file_prefetch(PlatFile *f, uint64_t off, uint64_t n) { (void)f, (void)off, (void)n; }
+
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     static __thread HANDLE ev;
     if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
