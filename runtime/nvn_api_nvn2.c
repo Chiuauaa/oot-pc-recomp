@@ -104,7 +104,8 @@ NVN2_NOT_RECORDED(nvnCommandBufferComputeDirtyTileMap)
 // native hash, lowered or not) and its arguments, and every 600 calls a running count per entry point, to size the
 // work of replaying them (VK_EXT_mesh_shader, or task/mesh stages run as compute on GPUs without it).
 _Thread_local const prog_t *nvn2_last_program;   // nvn_api_cmd.c nvnCommandBufferBindProgram, the recording thread's last
-static void mesh_note(const char *name, const Cpu *c) {
+// Also called by nvn_api_cmd.c for DrawMeshTasks and DrawMeshTasksIndirect, which record OP_DRAW_MESH as well.
+void nvn2_mesh_note(const char *name, const Cpu *c) {
     static int on = -1;
     if (on < 0) on = getenv("OOT_MESH_LOG") != NULL;
     static volatile int64_t calls;
@@ -137,11 +138,9 @@ static void mesh_note(const char *name, const Cpu *c) {
            p ? p->nstage : 0, st, (unsigned long long)arg_x(c, 1), (unsigned long long)arg_x(c, 2),
            (unsigned long long)arg_x(c, 3), (unsigned long long)arg_x(c, 4));
 }
-#define NVN2_MESH_NOT_RECORDED(n) NVN_API(nvnCommandBuffer##n) { mesh_note(#n, c); }
-NVN2_MESH_NOT_RECORDED(DrawMeshTasks)
+#define NVN2_MESH_NOT_RECORDED(n) NVN_API(nvnCommandBuffer##n) { nvn2_mesh_note(#n, c); }
 NVN2_MESH_NOT_RECORDED(DrawMeshTasks3D)
 NVN2_MESH_NOT_RECORDED(DrawMeshTasks3DIndirect)
-NVN2_MESH_NOT_RECORDED(DrawMeshTasksIndirect)
 NVN2_MESH_NOT_RECORDED(MultiDrawMeshTasks3DIndirect)
 NVN2_MESH_NOT_RECORDED(MultiDrawMeshTasks3DIndirectCount)
 NVN2_MESH_NOT_RECORDED(MultiDrawMeshTasksIndirect)

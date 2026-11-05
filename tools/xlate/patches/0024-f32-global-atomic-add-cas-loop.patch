@@ -1,0 +1,30 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -236,11 +236,26 @@
+         {
++            bool floatAdd = storageKind == StorageKind.GlobalMemory && op == AtomOp.Add && type == AtomSize.F32FtzRn;
+             if (storageKind == StorageKind.GlobalMemory &&
+-                context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() &&
++                context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() && !floatAdd &&
+                 (type is not (AtomSize.S32 or AtomSize.U32) ||
+                  op is not (AtomOp.Add or AtomOp.Min or AtomOp.Max or AtomOp.And or AtomOp.Or or AtomOp.Xor or AtomOp.Exch)))
+             {
+                 throw new System.NotSupportedException("Storage candidates v1 supports only 32-bit integer atomics.");
+             }
++            if (floatAdd)
++            {
++                // RED/ATOM.ADD.F32 on global memory: a compare-and-swap loop over the 32-bit word, as Eden emits
++                // StorageAtomicAddF32 (f32_add_cas), so no float-atomic device feature is needed. GlobalToStorage
++                // turns the load and the CAS into storage-buffer accesses like any other global access. The sum
++                // rounds to nearest; denormals are not flushed. Returns the value before the add (ATOM's result).
++                Operand loopHead = Label();
++                context.MarkLabel(loopHead);
++                Operand oldValue = context.Load(storageKind, e0, e1);
++                Operand newValue = context.FPAdd(oldValue, value);
++                Operand casResult = context.AtomicCompareAndSwap(storageKind, e0, e1, oldValue, newValue);
++                context.BranchIfTrue(loopHead, context.ICompareNotEqual(casResult, oldValue));
++                return oldValue;
++            }
+             Operand res = Const(0);
+
+             switch (op)

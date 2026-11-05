@@ -12,6 +12,48 @@ All native shader captures, translated shader files, logs and replay packets rem
 
 ## Upstream branch audit
 
+### Performance comparison in the shared build directory
+
+The executable comparison between `oot-storage-candidates.exe` and the first
+ISBEWR build confines changed machine code to the Ampere lowering object.
+The former must not be treated as an unmodified principal-branch executable.
+The principal branch is `origin/oot-port`. Its memory synchronization,
+pipeline-cache and presentation sources are identical to this fix branch.
+
+A controlled runtime comparison uses the principal runtime source snapshot,
+the same generated game C, current translator and `build/v111/shader-cache`.
+The current `guest_jump.c` and header are retained solely for compatibility
+with that generated C. This is a runtime isolation experiment, not a complete
+principal-branch build. In the 3D scene it records 15.3 FPS, about 62 ms replay
+per frame, without material shader-translation or pipeline-build waits. Thus
+the latest ISBEWR fix alone does not explain the slow result. A comparison
+with the preserved older translator remains in progress. Logs are private
+under `build/oot-fix/performance-compare/`.
+
+The frozen native corpus accepts 6,339 of 6,413 stages before and after the
+ISBEWR change. Seven accepted outputs change, all with SPH type 1; no accepted
+stage is lost. Acceptance does not establish their Vulkan behavior.
+
+On the user's Ryzen 9 9950X3D, builds should use 32 jobs (16 cores, 32 logical
+processors). The comparison's initial 24-job compile took 197.9 seconds and
+peaked at about 7 GiB across compiler processes. Its tail consisted of single
+large translation units; increasing job count cannot parallelize an individual
+Clang process. The subsequent incremental link with 32 jobs took 0.8 seconds.
+
+### Follow-up: ISBEWR register shadowing
+
+Lichii commit `b328477840f24da9238b8ea3c17747e01b9b2a73` reports that
+an Ocarina mesh shader wrote a high register through ISBEWR without shadowing
+it, producing a NaN at Link's house door that bloom amplified into white glow.
+The same omission existed in our lowering and the upstream correction is now
+applied. The build succeeds; its effect on this port still needs visual
+verification. The user confirmed that the earlier build reached the 3D scene,
+but has reported excessive brightness there.
+
+The newer `fix/oot-fog` tip `8390649c0c0699192b35f486f3aac6d9cf88c8b3`
+also changes per-tap gather proof for LEA instructions in an upscaler shader.
+Our proof differs from upstream and needs a separate semantic comparison.
+
 Repository: [zortos293/Lichii](https://github.com/zortos293/Lichii). Snapshot taken on 2026-11-05. Baseline: `724aede4ea51fae8224cdd02549cdbdf7ceecd25`, recorded by this checkout's `runtime/third_party/eglantine/UPSTREAM_COMMIT` before this investigation.
 
 All 82 advertised branch tips were fetched and screened by commit identity, changed paths and Ampere directory tree identity. They contain 27 distinct Ampere source trees. The complete branch-tip inventory is in [oot-upstream-branches.csv](oot-upstream-branches.csv). This is a source inventory, not a claim that every branch was built or tested. Shallow history is insufficient to establish that a change has been merged; file comparisons are used instead.
@@ -412,3 +454,408 @@ frames from the Vulkan driver, so the driver-side cause is not yet known. The
 10 Vulkan validation messages in that log were repeats of
 `VUID-vkCmdDrawIndexed-None-06479`, about depth-comparison sampling; none
 identified that queue submission. Do not treat this separate abort as fixed.
+
+## Mesh draws: what the Lichii ISBEWR fix can and cannot explain here
+
+A second Lichii snapshot on 2026-11-05 (103 branch tips; `nx2` now at
+`8813b44794fd3bd1833165f9f8802925a09e3861`, `fix/oot-fog` at
+`8390649c0c0699192b35f486f3aac6d9cf88c8b3`) adds these Ocarina-related branches:
+`fix/oot-upscaler-gathers`, `exp/oot-k4-lowering`, `test/oot-fog-perf`,
+`test/oot-k4-mem` and `test/oot-input`. Their Ocarina shader commits are the same
+gather, ISBEWR and LEA changes already reviewed; the rest are Lichii emulator
+diagnostics (debug server, frame-dump probes, buffer-cache fences, GPU time scaling).
+
+- ISBEWR shadowing (`b328477`): the NaN it fixes was written by a **mesh** program
+  (Lichii hash `8159e91e0097876a`) storing R238/R240 through ISBEWR. In this port
+  every SPH type 3 stage still fails at +0 with `native tessellation stage buffer
+  read mode` (64 stages in `build/oot-fix/shadow-lowering.txt`), and
+  `nvnCommandBufferDrawMeshTasks*` were accepted without being recorded. That
+  program therefore never runs here, so the upstream fix cannot change this port's
+  brightness. Its seven changed outputs are SPH type 1 task programs, which are
+  only used by the same unreplayed mesh draws.
+- LEA in the per-tap offset proof (`8390649`): our proof in `lower_to_maxwell.h`
+  treats an instruction without a modelled write count as writing one register
+  (`write_count(definition).value_or(1)`) and only fails if that register is an
+  offset register. LEA/LEA.HI already pass here; no import is needed.
+- `EDEN_NX2_HANDLE_ALIGN` (`dfb0b6b`) concerns Lichii's handle programs, and the
+  alpha-reference rounding (`ec3a455`) is a pipeline-count optimisation. Neither
+  maps onto a known brightness fault in this runtime.
+
+The earlier capture showed sky values left under Link's cap and shirt while the
+depth buffer contained the room and Link. If the colour/material pass draws those
+objects through task/mesh programs (Eglantine NX2_NOTES row 97 reports high-detail
+geometry drawn that way), dropped mesh draws would leave exactly this pattern. That
+is a hypothesis to measure, not yet a diagnosis.
+
+### Mesh draw instrumentation
+
+`nvnCommandBufferDrawMeshTasks` and `nvnCommandBufferDrawMeshTasksIndirect` now
+record `OP_DRAW_MESH` (`runtime/nvn_api_cmd.c`) with their raw arguments, because
+the NVN 2 argument layout is not yet confirmed. The replay still draws nothing for
+them. `runtime/vk_exec.c` counts them per frame (`mesh N` in the `TOTK_TRACE=gfx`
+frame line), and `runtime/vk_dump.c`, `vk_dump_mesh`, logs each distinct program
+once with its stage hashes, arguments, caller and the pass's targets; during an
+armed capture the draw is listed with that pass's skipped draws. `nvn_probe.c`
+covers the record path. Launcher: `build/v111/Play OOT mesh trace.cmd`.
+
+What to check in the log: how many mesh draws a 3D frame drops, whether their
+targets are the scene's HDR/G-buffer targets that later show sky values, and
+whether the logged stage hashes match the 64 rejected SPH type 3 stages. If they
+do, the next step is the real mesh path (plan above), not further colour work.
+
+## Live NaN isolation on 2026-11-05
+
+The previous session added two environment-only diagnostics in `runtime/vk_dump.c`:
+`vk_dump_skip_fs` omits draws whose fragment SPIR-V hash is in `DKB_SKIP_FS_FILE`
+(one hexadecimal hash per line, maximum 64, reread every 60 frames). The trigger
+path can be recreated for repeated captures; subsequent captures use `capture-N`.
+Neither diagnostic is a rendering fix.
+
+The resumed process (PID 54264) produced these private captures under
+`build/oot-fix/bright-02/`. Match passes by their targets and ordering, not their
+sequence numbers, which change between frames. Counts below are NaN **channel
+values**, not pixels (`runtime/vk_dump.c`, `write_images`, increments per channel).
+
+| Capture | Disabled fragment shaders | Material target result |
+| --- | --- | --- |
+| root, frame 17299 | none | pass 0193 has zero NaNs; pass 0195 has 785181 |
+| capture-2, frame 19466 | previous 24 candidates | pass 0168 still has 314361 |
+| capture-3, frame 21471 | 25 listed in current baseline material pass | pass 0168 still has 353772 |
+| capture-4, frame 22738 | expanded union of 35 | pass 0185 still has 290283 |
+| capture-5, frame 23621 | expanded union of 52 | pass 0184 has zero; following pass 0185 has 801513 |
+| capture-6 | baseline 25 plus first 13 of the remaining 27 | pass 0184 still has 563670 |
+| capture-7, frame 28605 | baseline 25 plus seven of the final 14 | pass 0185 still has 64197; following pass 0186 has 855393 |
+
+The initial 24-shader list is incomplete. `vk_dump_draw` retains only 48 distinct
+pipeline/texture combinations per pass (`MAX_ENTS`); later combinations increment
+`ents_over` without logging their shader hashes. Omitting listed shaders exposes
+further shaders in the next capture. The expanded list and intermediate lists are
+private diagnostic files beside the captures, not source assets.
+
+The 52-shader experiment removes NaNs from the material pass but leaves NaNs in
+the following pass. Do not use absence of NaNs across the entire frame as the
+bisection criterion. This also does not prove a single faulty shader: removing a
+draw can suppress either a bad writer or an input consumed by another writer.
+The resumed run remained active with recent 60 FPS log samples and no logged
+`FATAL` or `DEVICE_LOST` at that check. Capture frames themselves incur readback
+stalls and must not be used as normal frame-time measurements. No visual fix is
+claimed. Mesh omissions remain a separate known limitation.
+
+### Confirmed contributing shader and control captures
+
+A second isolation method restored half the candidate shaders at a time while
+keeping every other shader in the 52-member union disabled. The private script
+`build/oot-fix/bright-02/isolate.py` matches the material render pass immediately
+after compute SPIR-V `e861c3ee65989925`, then waits for its image statistics and
+the capture trigger to be removed. Results and disabled lists are preserved in
+`isolation-results.json`. It restores an empty skip list on exit.
+
+| Capture | Restored group size during narrowing | Material NaN channel values |
+| --- | --- | --- |
+| capture-8 | 26 | 186942 |
+| capture-9 | 13 | 29229 |
+| capture-10 | 6 | 38802 |
+| capture-11 | 3 | 10758 |
+| capture-12 | 1 | 84528 |
+| capture-13 | same single shader, repeated | 85917 |
+| capture-14 | none of the 52 | 0 |
+| capture-15 | all except the isolated shader (only that shader disabled) | 958248 |
+
+The isolated fragment SPIR-V is `00fa71076eb7ed90`, native stage
+`abc4dfd9710c36d2`. The baseline identifies program 9338, vertex SPIR-V
+`6bbf02f61dced541`, native vertex `6a0772c1c603e354`. Re-enabling that fragment
+shader is sufficient to reintroduce NaNs with the other 51 omitted. Disabling it
+alone is insufficient to remove NaNs from the full material pass. Therefore it is
+a confirmed contributing draw group, **not** a unique root cause or a fix.
+
+Its captured SPIR-V passes `spirv-val --target-env vulkan1.3`. Structural validity
+does not validate numerical semantics or bound data. Local disassembly contains
+reciprocals, texture sampling and square roots. One inspected square root is
+preceded by `FClamp(0,1)`, so merely seeing a square root does not establish the
+source of a NaN. Eglantine's
+`src/shader_recompiler/backend/spirv/emit_spirv_floating_point.cpp` also emits
+`OpFClamp`; this observation does not justify changing saturation semantics.
+No shader or runtime rendering fix was made during this isolation. Subsequent
+work should trace this shader's inputs and first non-finite intermediate, and
+isolate additional contributing groups separately. All draws were restored after
+the final capture; the game was left running.
+
+### Follow-up correction and numerical experiment
+
+`runtime/vk_dump.c`, `vk_dump_draw` and `vk_dump_pass_end`, now retain a separate
+per-pass list of up to 512 distinct fragment hashes. This list is emitted even
+when the 48 detailed pipeline/texture entries overflow. It also writes the
+corresponding SPIR-V through `shader_hash`; overflow of the independent list is
+explicitly reported. This fixes the incomplete candidate enumeration demonstrated
+above. The Vulkan dump object compiled and the executable linked successfully;
+`git diff --check` and `tools/check_content.py --staged` passed. Live verification
+of the new summary is pending a capture from the rebuilt process.
+
+The existing opt-in numeric min/max/SAT translator was built into an ignored test
+folder. Its owned GPU fixture passed 36 strict checks with zero mismatches and
+zero Vulkan validation errors on the local GPU. This verifies the fixture, not
+the game's NaN root cause. Applying that option globally produced a compute
+pipeline logged as 20700 KB of SPIR-V, with an 84845 ms pipeline build. A scratch
+variant limits the three numeric code-generation branches to fragment stages;
+its source and executable remain under `build/oot-fix/defined-float-xlate/`.
+Constant folding still uses the numeric opt-in implementation. The scratch
+executable uses its own identity (`3747a1f43da7f006` prefix), not the default
+translator's cache identity. No default shader semantics have been changed.
+
+The initial Python launches redirected stderr to a file and hid the console;
+this was unsuitable for the user's workflow. A pipe-and-tee trial also did not
+establish a working menu. The direct CMD launcher restores the original visible
+console and the runtime's simultaneous `logs/totk.log` recording. Both the direct
+baseline and fragment-only experimental launches advanced beyond frame 600/360,
+respectively, with 60 FPS samples. A black loading screen alone is not evidence
+that the NaN fix works or that the playable scene has loaded. Preserve live
+console visibility on subsequent launches. Scratch launchers and experiment logs
+remain private under `build/`.
+
+### Settled-map follow-up and limitations of the numeric experiment
+
+After the user confirmed the map was loaded, performance samples showed zero
+pending draws, zero shader waits and zero pipeline builds at about 60 FPS. No
+more desktop screenshots were taken; subsequent checks read capture statistics
+and shader lists only. Captures must wait for loading/compilation to finish.
+
+The fragment-only experiment maps native fragment `abc4dfd9710c36d2` to SPIR-V
+`1a8b24e03070da0a`. The settled-map capture-2 still contains 1118040 NaN channel
+values in material pass 0194 and 1571955 in the following pass. The numeric
+variant therefore does not fix the full scene. These counts must not be compared
+as a controlled improvement/regression against an older camera pose.
+
+Further exclusion captures exposed additional programs entering the material
+pass over time, despite zero pending compilations. The complete per-pass hash
+summary now makes this visible. Captures 3, 4 and 5 still retained respectively
+six, four and two fragment shaders in the material pass; they are **not**
+single-shader numerical tests. Capture-5 retained `1a8b24e03070da0a` and
+`c6f61bb34dd254a2`, with 11139 NaN channel values. It would be incorrect to
+attribute that count exclusively to the originally selected shader.
+
+The bounded confirmation script (`build/oot-fix/bright-numeric/confirm.py`)
+requires the latest performance interval to have zero pending draws and zero
+shader waits before each capture, records every remaining material shader, and
+restores all draws in a finally block. Captures 6 through 11 never achieved a
+single remaining shader: the old executable's 64-entry exclusion limit kept
+letting different shaders through. The detailed results are private in
+`confirm-results.json`; no conclusion about the isolated shader's numerical
+semantics follows from those attempts. All draws were restored afterwards.
+
+To remove that diagnostic limitation, `runtime/vk_dump.c`, `skipfs_read`, now
+accepts 512 hashes, matching the independent coverage list's capacity. The object
+compiled, and a separate `build/v111/dkb-diagnostic.exe` was linked from the same
+build objects without closing the running game. That executable contains the
+512-entry change; the currently running process still has the older limit.
+It is a diagnostic correction, not a lighting fix. Source checks
+`git diff --check` and `tools/check_content.py --staged` passed.
+
+A read-only live check of the selected draw's recorded UBO addresses found no
+non-finite float words in c3, c4, c5, c6 or c7. The buffers were retained privately
+as `live-cN.bin`. This is CPU memory sampled after the captured frame, not proof
+of the exact values used by that earlier GPU draw; it does not validate SSBOs,
+textures, interpolation or arithmetic. The selected vertex shader explicitly
+initializes all its declared output components, so an uninitialized declaration
+alone is not evidence for this case. Its transformed normal uses inverse square
+root of its squared length; input/normal tracing remains open, and no workaround
+for zero normals has been applied.
+
+### First isolated NaN and live numerical probes
+
+The 512-entry executable isolated native fragment `abc4dfd9710c36d2` in
+`build/oot-fix/bright-single/capture-4/`: material pass 0189 lists only its numeric
+SPIR-V variant `1a8b24e03070da0a` and contains 7602 NaN channel values. This is the
+first exclusion capture with a verified single remaining material shader. The
+numeric min/max experiment does not remove this case.
+
+An opt-in local probe loader is now available through `DKB_FS_OVERRIDE_HASH`
+(original fragment SPIR-V FNV hash) and `DKB_FS_OVERRIDE_FILE` (probe module).
+`runtime/gfx_shader.c`, `gfx_shader_debug_override`, checks the original module
+prefix and permits only appended private tracing declarations; each variant has
+a distinct pipeline key, shares the unchanged resource reflection and stays out
+of the ordinary disk shader cache. At most 32 variants remain resident for cached
+pipelines/in-flight commands. The file is reread every 60 frames; removing it
+restores the original shader. The draw path applies the probe after shader memo
+lookup, so a cached original stage does not suppress a probe change.
+`tests/gfx_shader_probe_test.c` tests the production declaration guard, including
+changed bindings/locations, non-private state, malformed/truncated instruction
+streams and missing function bodies. It passes at O0 and O2. The runtime compiled
+and linked successfully. Probe binaries are separately validated with spirv-val.
+
+The private first-NaN instrumenter retains the original declarations and records
+the first arithmetic/texture operation producing NaN, then encodes that operation
+ID in the material colour. Loads and bitcasts are not treated as arithmetic:
+packed integer metadata can legitimately have NaN-looking encodings. The probe
+instruments 1218 operations and validates for Vulkan 1.3. This is instrumentation,
+not a rendering correction; its finite diagnostic output is not evidence that
+NaNs have been fixed.
+
+In `build/oot-fix/bright-trace/`, the first isolated probe capture contains only
+probe fragment `5c9fc0482f3de9d9`. Its raw material image encodes result ID 4593
+in 3055 pixels. The original numeric module has:
+
+- `%4591 = OpLoad %float %297`
+- `%4592 = OpLoad %float %668`
+- `%4593 = OpFMul %float %4591 %4592`
+
+A second probe reports those two operands. Its isolated capture-3 (probe hash
+`8deffdb1c107a6b1`) contains 3062 pixels with NaN in the first operand and zero in
+the second. The first operand comes from a uint SSBO load, bitcast to float: the
+load at result 2927 supplies the value stored in function variable 297. The source
+expression addresses the buffer declared at driver c0+0x530, at base+64. Therefore
+changing the multiply or clamping its output would hide an invalid input rather
+than establish the cause. The actual offending storage address and its producer
+remain to be identified.
+
+A CPU read of the *representative* c0+0x530 binding address printed in the pass
+found zero at +64. Do not conclude that this proves a mirror synchronization bug:
+detailed capture entries group draws by pipeline/textures and can represent a
+different instance/buffer. Inline GPU updates can also differ from later CPU
+memory. A live address probe is needed for the actual affected pixels.
+
+Later measurements lost the original affected geometry from view. A listed draw
+alone does not establish visible pixel coverage; finite or absent probe values
+from those measurements are not a successful correction. The two inspected
+render-pass images were from the already loaded map, not desktop/loading-screen
+screenshots. Probes were paused by removing the override file and restoring an
+empty exclusion list while the camera is repositioned. Preserve both shader
+identity and visible coverage for subsequent before/after comparisons.
+
+### Cross-check of the second agent's culling and mesh report
+
+The user supplied another agent's report: the second culling compute usually sees
+an empty instance list, and only about 17 of 140 dispatches write a count (roughly
+nine instances each). That experiment has not been independently replayed here.
+Its suggestion that the workload is vegetation is a hypothesis, not an established
+identity. Empty indirect arguments alone are not evidence of a lost GPU store.
+
+The report's missing mesh path is independently confirmed in current source:
+`runtime/nvn_api_cmd.c`, `nvnCommandBufferDrawMeshTasks` and
+`nvnCommandBufferDrawMeshTasksIndirect`, record `OP_DRAW_MESH` with raw arguments.
+`runtime/vk_exec.c`, the `OP_DRAW_MESH` replay case, increments a counter and calls
+`vk_dump_mesh` without issuing a Vulkan draw. Other mesh entry points in
+`runtime/nvn_api_nvn2.c` remain unrecorded. In the Ampere lowerer's ISBERD/ISBEWR
+case, task/mesh stage-buffer forms still reject as tessellation/geometry modes.
+Changing the error text or accepting the stage type would not implement their
+stage-buffer communication, emitted vertices, primitives or draw replay.
+
+The current process's log contains 111 messages with
+`native tessellation stage buffer read mode`. This is an event count. The normal
+settled-map capture `build/oot-fix/bright-trace/capture-11/` records at least 34
+direct and 41 indirect omitted mesh draws in that frame. These are per-frame
+records, so they must not be equated with the other agent's nearly 700 calls
+accumulated while entering the scene. Capture limits can omit additional detail.
+The final presented image remains white, with HUD/minimap visible; the material
+pass 0181 already has 883620 NaN channel values, increasing to 1495308 in pass
+0182. No probe or exclusion was active for this normal capture.
+
+The missing mesh implementation explains a definite category of absent geometry.
+It does not prove the origin of the independently measured NaN in a conventional
+fragment draw. Retain both findings: do not label empty culling counts a write
+failure, and do not claim mesh replay is implemented or that implementing it alone
+has been shown to remove the NaN.
+
+### Address of the first invalid coefficient and revised coherence hypothesis
+
+The address probe now gates its colour code on first-invalid-operation ID 4593,
+so only pixels with that failure report an address. Captures are made after the
+loaded-map performance interval reports zero pending shader/pipeline work. Probe
+captures 19--22 preserve all other draws to avoid changing the producer workload.
+The low-address probe encoded `0x7f40` (3164 pixels); the next address segment
+encoded `0x1693` (2194 pixels); a separate c0 high-word probe encoded 2 (13802
+pixels). Together these identify the load at `0x25a4c7f40`, base plus 64. Different
+pixel counts/locations across these captures prevent pixelwise subtraction; use
+the repeated encoded address populations instead. The raw coefficient probe
+encoded a NaN upper-bit pattern `0x7fffc000` in 3636 pixels.
+
+A read-only inspection of the current memory index found that address inside an
+imported pool `[0x25a4c6000,0x25a4c8000)`, flags `0x24`, with an active VRAM mirror.
+This confirms which backing mechanism is used; it does not establish a mirror
+bug. Earlier CPU memory samples were finite/zero, but a later sample contains
+`0x7fffffff` at coefficient +64, plus positive infinity at +48 and negative
+infinity at +80. Several adjacent RGB coefficients share these values. Therefore
+CPU and GPU can both contain the invalid data: the earlier zero CPU sample is
+not sufficient evidence of stale GPU storage.
+
+A controlled experiment was prepared to rewrite *identical existing zero bytes*
+to exercise write tracking. It checked all 192 bytes first and refused because
+the CPU contents had changed; **no bytes were written**. No zeroing or saturation
+workaround was applied. A 15-second read-only sample of the replay's existing
+inline update ring found no covering update, which only excludes observed
+inline updates in that interval, not shader/copy/CPU producers.
+
+The next run uses the existing `TOTK_DUMP_BUF=0x25a4c7f00:0xc0` diagnostic to retain
+the GPU buffer after every logged pass. The private launcher
+`build/v111/oot-nan-buffer.cmd` keeps the live console and `logs/totk.log`, leaves
+the fragment probe file absent and all draws enabled, and targets
+`build/oot-fix/bright-buffer/`. Its first capture is reserved for the fully loaded
+map; no trigger should be written during compilation. `analyze.py` in that private
+folder reports the first non-finite buffer words and the corresponding pass.
+The producer remains unconfirmed; the fragment multiply is a consumer of already
+invalid data, not yet a demonstrated arithmetic-lowering fault.
+
+## First NaN fixed: missing NVN 2 dispatch counts
+
+The fully loaded baseline capture `build/oot-fix/bright-buffer/` establishes the
+producer. Buffer `[0x25a4c7f00,+0xc0)` is finite after pass 0000 and remains finite
+after pass 0020 (`fa3ede6464e186b3`). After pass 0112, compute SPIR-V
+`21238adc0f99baaf`, it contains positive/negative infinity and NaNs, including
+`0x7fffffff` at +0x40. That dispatch is 1x1x1 and samples a 256x256 RGBA16F image
+whose preceding pass captures contain only finite values. Its output is the
+lighting-coefficient buffer consumed by the fragment draw isolated above.
+
+Disassembly identifies an actual host ABI omission: the compute reads workgroup
+counts at driver c0+4 and +8, multiplies each by its local width (32), then divides
+one by their product for sample normalization. `runtime/vk_exec_draw.c`,
+`vk_c0_fill`, packed NVN 2 roots and descriptors but returned with the first 16
+bytes zeroed by `nvn2_c0_pack`. Both counts were zero, so this dispatch divided by
+zero before accumulating its lighting coefficients. The fragment multiply was
+propagating the resulting invalid coefficient, not generating it independently.
+
+The correction fills c0+4/+8/+12 from the actual direct-dispatch workgroup counts
+through `runtime/nvn2_c0.h`, `nvn2_c0_dispatch`. `op_dispatch_ind` copies the actual
+GPU arguments to those same header words for NVN 2 and retains +0x200 for NVN 1.
+Both paths preserve the roots starting at +0x10 and all resource tables; GPU-patched
+indirect banks are not reused. Counts are not guessed from image dimensions or
+local thread counts. Eglantine's available shader sources and NX2 notes were
+consulted first; this reference checkout does not contain its NVN/QMD runtime
+implementation, so the concrete offset evidence here is the captured game shader
+and measured dispatch. No upstream implementation was copied.
+
+Validation:
+
+- `tests/nvn2_compute_c0_test.py`: 33 checks, zero failures.
+- `tests/nvn2_indirect_c0_test.py`: 34 checks, zero failures, exercising the actual
+  indirect replay function with CPU Vulkan stubs and preserving NVN 1 offsets.
+- `tests/nvn2_dispatch_header_test.py`: the actual production `vk_c0_fill` passes
+  at O0 and O2 for both ABIs, roots/descriptors and nonzero normalization count.
+- Runtime compilation and link passed. `git diff --check` and
+  `tools/check_content.py --staged` passed.
+
+The after capture `build/oot-fix/bright-headfix/` uses the same compute SPIR-V
+`21238adc0f99baaf` at pass 0112. Every retained buffer snapshot is finite; +0x40 is
+now `0x403bad0e`. Material pass 0193 and subsequent scene pass 0194 report **zero
+NaN channel values**, with all draws enabled and the override probe absent.
+The environment/coefficient defect is fixed without clamping or discarding draws.
+The normal scene is visible again but remains too bright; missing mesh geometry
+and presentation/upscaler semantics remain separate issues. The experimental
+fragment-only numeric translator was held constant across this before/after
+comparison and is not established as necessary for the fix.
+
+### The next apparent NaN is packed data, not another numerical failure
+
+After the header correction, the only nonzero NaN counter in the after capture
+is pass 0224: compute `cbf73b50fdccf3cd` writes through an R32_UINT storage view
+(NVN override 0xb) over a base R11G11B10F image. Its shader explicitly packs the
+square roots of the preceding colour channels as shared-exponent RGB9E5 words.
+The dump's base-format interpretation labels 116885 channel values NaN, but this
+is not the format the next stage samples.
+
+The private `check_packed.py` independently decoded all 2764800 RGB9E5 channel
+values: **zero non-finite values**. The subsequent RGB9E5 source copy preserves
+every packed word (zero bit mismatches). Decoded values differ from the square
+roots of pass 0221's channels by at most 0.0018527, consistent with packing
+quantization. Do not clamp or zero those apparently invalid R11 values: that
+would corrupt valid RGB9E5 data. The upscaler stand-in's treatment of that
+square-root encoded signal remains a specific brightness investigation target;
+no presentation fix is claimed from this observation alone.

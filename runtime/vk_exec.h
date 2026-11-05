@@ -152,6 +152,7 @@ void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap);
 // TOTK_TRACE=gfx: replay counters of the current frame, logged and reset at each present (vk_exec_frame_log).
 typedef struct {
     uint64_t passes, draws_seen, draws, clears, copies, dispatches, submits;
+    uint64_t mesh_draws;   // NVN 2 mesh-task draws recorded but not replayed (OP_DRAW_MESH)
     uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
@@ -169,6 +170,9 @@ void vk_dump_init(void);                 // reads the environment; vk_exec_recor
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
 void vk_dump_draw_skip(VkExec *ex, const char *reason);   // failed or pending draws, grouped per pass and program
+extern int vk_dump_skip_fs_on;   // DKB_SKIP_FS_FILE set: vk_dump_skip_fs runs for every draw
+int vk_dump_skip_fs(const GfxShader *fs);   // 1: leave this draw out (its fragment shader is listed)
+void vk_dump_mesh(VkExec *ex, const void *payload);   // OP_DRAW_MESH: names its program once, a skip when armed
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs

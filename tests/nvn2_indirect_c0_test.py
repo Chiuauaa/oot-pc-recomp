@@ -53,6 +53,9 @@ static void note_work(const VkExec *ex, int kind, uint64_t work) {
     noted.calls++;
 }
 static void warn_once(int code, const char *format, ...) { (void)code; (void)format; abort(); }
+static void skipped_dispatch_log(VkExec *ex, const char *kind, unsigned x, unsigned y, unsigned z) {
+    (void)ex; (void)kind; (void)x; (void)y; (void)z; abort();
+}
 static int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *sp) {
     (void)addr; (void)size; *sp = (VkMemSpan){(uint8_t *)arguments,4,0}; return 1;
 }
@@ -98,9 +101,9 @@ static void run(const Nvn2C0Layout *layout, unsigned expected_copies) {
     memset(&noted, 0, sizeof noted);
     op_dispatch_ind(&ex, &d);
     CHECK(dispatches == 1 && !memcmp(groups, arguments + 1, sizeof groups), "indirect dispatch keeps actual GPU arguments");
-    CHECK(copies == expected_copies, "only the NVN 1 bank receives the legacy dimension copy");
+    CHECK(copies == expected_copies, "each bound bank receives actual GPU dispatch dimensions");
     CHECK(ex.recorded == 1 + expected_copies && barriers == 1 + expected_copies, "copy bookkeeping follows the selected ABI");
-    CHECK(B.c0_valid[2] == (bind_c0 && !expected_copies), "the NVN 2 packed bank stays reusable");
+    CHECK(B.c0_valid[2] == (bind_c0 && !expected_copies), "a GPU-patched bank is not reused by a later dispatch");
     CHECK(noted.calls == 1 && noted.ex == &ex, "indirect dispatch profiles its executor exactly once");
     CHECK(noted.kind == 3 && noted.work == 0, "indirect profiling keeps the GPU-only work count unknown");
     CHECK(noted.recorded == 1 + expected_copies && noted.dispatches == 1 && !noted.twin_dispatch,
@@ -124,14 +127,16 @@ int main(void) {
     Nvn2C0Layout layout = {.ubos=1, .roots={64,64}};
     CHECK(nvn2_c0_pack(bank, sizeof bank, &layout, roots, ssbo, ubo), "synthetic roots cross the legacy +0x200 slot");
     memcpy(expected, bank, sizeof bank);
-    run(&layout, 0);
+    memcpy(expected + NVN2_C0_DISPATCH_OFFSET, arguments + 1, sizeof groups);
+    run(&layout, 1);
     CHECK(!memcmp(bank, expected, sizeof bank), "NVN 2 declared root words survive indirect dispatch unchanged");
 
     layout.roots[1] = 60;
     CHECK(nvn2_c0_part(&layout, 1) == 0x200 && nvn2_c0_pack(bank, sizeof bank, &layout, roots, ssbo, ubo),
           "synthetic NVN 2 uniform table starts at +0x200");
     memcpy(expected, bank, sizeof bank);
-    run(&layout, 0);
+    memcpy(expected + NVN2_C0_DISPATCH_OFFSET, arguments + 1, sizeof groups);
+    run(&layout, 1);
     CHECK(!memcmp(bank, expected, sizeof bank), "NVN 2 buffer address/size survive indirect dispatch unchanged");
 
     memcpy(bank, expected, sizeof bank);

@@ -42,6 +42,8 @@
 
 #include "cfg.h"
 #include "gfx.h"
+#include "sha256.h"
+#include "gfx_shader_probe.h"
 #include "host.h"
 #include "nvn_geometry_control.h"
 #include "platform/platform.h"
@@ -2338,6 +2340,78 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
     if (words) *words = s->words;
     return s->spirv;
+}
+
+// DKB_FS_OVERRIDE_HASH=<original SPIR-V FNV hash>, DKB_FS_OVERRIDE_FILE=<local SPIR-V>.
+// The diagnostic rereads the file every 60 frames so numerical probes need no game restart. Probes must preserve
+// the original declarations verbatim, appending only private tracing declarations before the first function.
+// Variants remain resident because in-flight commands and cached pipelines can still reference them. None enter
+// the normal shader cache, and removing the file restores the original shader.
+const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame) {
+    static int initialized;
+    static const char *path;
+    static uint64_t wanted, checked = UINT64_MAX;
+    static const GfxShader *base, *current;
+    static GfxShader *variants[32];
+    static unsigned nvariants;
+    if (!initialized) {
+        const char *hash = getenv("DKB_FS_OVERRIDE_HASH");
+        path = getenv("DKB_FS_OVERRIDE_FILE");
+        wanted = hash ? strtoull(hash, NULL, 16) : 0;
+        initialized = 1;
+    }
+    if (!path || !*path || !wanted || !s || s->stage != GFX_STAGE_FS) return s;
+    if (!base) {
+        uint64_t h = 0xcbf29ce484222325ull;
+        const uint8_t *bytes = (const uint8_t *)s->spirv;
+        for (uint64_t i = 0; i < s->words * 4; i++) h = (h ^ bytes[i]) * 0x100000001b3ull;
+        if (h != wanted) return s;
+        base = s;
+    }
+    if (s != base) return s;
+    if (checked != UINT64_MAX && frame < checked + 60) return current ? current : s;
+    checked = frame;
+    size_t size = 0;
+    uint32_t *words = (uint32_t *)read_file(path, &size);
+    if (!words) {
+        if (current) rt_log("gfx_shader: fragment probe removed; original shader restored");
+        current = NULL;
+        return s;
+    }
+    int valid = !(size & 3) && gfx_probe_declarations(s->spirv, s->words, words, size / 4);
+    if (!valid) {
+        free(words);
+        rt_log("gfx_shader: fragment probe rejected: declarations or module framing changed");
+        return current ? current : s;
+    }
+    Sha256 hash;
+    uint8_t key[32];
+    sha256_init(&hash);
+    sha256_update(&hash, s->key, 32);
+    sha256_update(&hash, words, size);
+    sha256_final(&hash, key);
+    for (unsigned i = 0; i < nvariants; i++) {
+        if (!memcmp(variants[i]->key, key, 32)) {
+            free(words);
+            return current = variants[i];
+        }
+    }
+    if (nvariants == sizeof variants / sizeof *variants) {
+        free(words);
+        rt_log("gfx_shader: fragment probe limit reached (32 variants)");
+        return current ? current : s;
+    }
+    GfxShader *variant = malloc(sizeof *variant);
+    if (!variant) { free(words); return s; }
+    *variant = *s;
+    variant->next = NULL;
+    variant->spirv = words;
+    variant->words = size / 4;
+    memcpy(variant->key, key, 32);
+    variants[nvariants++] = variant;
+    current = variant;
+    rt_log("gfx_shader: fragment probe variant %u loaded (%zu bytes)", nvariants, size);
+    return current;
 }
 
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }

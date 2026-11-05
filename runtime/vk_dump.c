@@ -51,7 +51,8 @@ int vk_dump_armed;
 static uint64_t dump_frame, log_from;   // log_from: TOTK_DUMP_LOG, first frame logged to passes.txt without images
 static const char *trigger_path;
 static int waiting_trigger;
-static char dir[400];
+static char dir[400], base_dir[400];   // base_dir: TOTK_DUMP_DIR; dir: where the current capture goes
+static int captures;                   // TOTK_DUMP_TRIGGER captures written; the second and later go to capture-<n>
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
 static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO
@@ -521,10 +522,64 @@ static uint64_t shader_hash(const GfxShader *s) {
     return h;
 }
 
+// ---- DKB_SKIP_FS_FILE=<file>: a diagnostic that leaves out every draw whose fragment shader has a listed SPIR-V hash
+// (the "fs" hash of passes.txt; one hexadecimal hash per line, at most 512). The file is read again every 60 frames, so
+// draws can be left out and brought back while the game runs, to find the shader that writes a fault (a NaN, a wrong
+// colour) into a target without reloading the scene. Unset, a draw pays one test of vk_dump_skip_fs_on.
+int vk_dump_skip_fs_on;
+static const char *skipfs_path;
+#define SKIP_FS_CAP 512
+static uint64_t skipfs_list[SKIP_FS_CAP], skipfs_frame = UINT64_MAX;
+static int nskipfs;
+static struct { const GfxShader *s; uint64_t h; } skipfs_tab[16384];   // SPIR-V hash per shader, open addressing
+static PlatMutex skipfs_lock = PLAT_MUTEX_INIT;
+
+static void skipfs_read(void) {
+    uint64_t list[SKIP_FS_CAP];
+    int n = 0;
+    FILE *f = fopen(skipfs_path, "rb");
+    char line[128];
+    while (f && n < SKIP_FS_CAP && fgets(line, sizeof line, f)) {
+        char *end;
+        uint64_t h = strtoull(line, &end, 16);
+        if (end != line) list[n++] = h;
+    }
+    if (f) fclose(f);
+    if (n != nskipfs || memcmp(list, skipfs_list, (size_t)n * sizeof *list))
+        rt_log("vk_dump: DKB_SKIP_FS_FILE: %d fragment shader%s left out", n, n == 1 ? "" : "s");
+    memcpy(skipfs_list, list, (size_t)n * sizeof *list);
+    nskipfs = n;
+}
+
+int vk_dump_skip_fs(const GfxShader *fs) {
+    if (!fs) return 0;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    plat_mutex_lock(&skipfs_lock);
+    if (skipfs_frame == UINT64_MAX || frame >= skipfs_frame + 60) skipfs_read(), skipfs_frame = frame;
+    int skip = 0;
+    if (nskipfs) {
+        size_t i = ((uintptr_t)fs >> 4) & 16383;
+        while (skipfs_tab[i].s && skipfs_tab[i].s != fs) i = (i + 1) & 16383;
+        if (!skipfs_tab[i].s) {
+            uint64_t words = 0, h = 0xcbf29ce484222325ull;
+            const uint8_t *b = (const uint8_t *)gfx_shader_spirv(fs, &words);
+            for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;   // as shader_hash
+            skipfs_tab[i].s = fs, skipfs_tab[i].h = h;
+        }
+        for (int k = 0; k < nskipfs && !skip; k++) skip = skipfs_list[k] == skipfs_tab[i].h;
+    }
+    plat_mutex_unlock(&skipfs_lock);
+    return skip;
+}
+
 // Per pass: distinct pipeline + texture sets, draws, 3D textures to copy at its end.
 typedef struct { VkPipeline p; uint64_t th; int draws; char *text; } Ent;
 static Ent ents[MAX_ENTS];
 static int nents, ents_over, pass_draws;
+// Keep shader coverage independent of the detailed pipeline/texture entry limit. A material pass can fill that
+// limit with repeated texture sets before later fragment programs are reached, making shader isolation incomplete.
+static uint64_t pass_fs[512];
+static unsigned npass_fs, pass_fs_over;
 typedef struct { VkImage image; VkFormat format; VkImageAspectFlags aspect; uint32_t w, h, d; int id, is2d; } Lut;
 static Lut luts[MAX_LUTS];          // queued for the next pass end or dispatch
 static int nluts;
@@ -732,10 +787,55 @@ out:
     plat_mutex_unlock(&rec_lock);
 }
 
+// OP_DRAW_MESH: the replay does not draw NVN 2 mesh tasks yet. Each distinct program is logged once with its raw
+// stage hashes, the call's raw arguments and the pass's targets, so a run shows which passes lose mesh geometry and
+// which task/mesh programs (their native hashes, as in the lowering failures) they need. During an armed frame capture
+// the draw is also listed with the pass's skipped draws.
+void vk_dump_mesh(VkExec *ex, const void *payload) {
+    enum { MAX_MESH_PROGS = 128 };
+    static uint64_t seen[MAX_MESH_PROGS];
+    static unsigned nseen;
+    const p_draw_mesh *m = payload;
+    uint64_t serial = ex->prog ? ex->prog->serial : 0;
+    int fresh = 0;
+    plat_mutex_lock(&rec_lock);
+    unsigned i = 0;
+    while (i < nseen && seen[i] != serial) i++;
+    if (i == nseen && nseen < MAX_MESH_PROGS) seen[nseen++] = serial, fresh = 1;
+    plat_mutex_unlock(&rec_lock);
+    if (fresh) {
+        char targets[512] = "";
+        vk_exec_targets_describe(ex, targets, sizeof targets);
+        Str b = {0};
+        sp(&b, "mesh draw not replayed: prog %llu %s args %#llx %#llx %#llx caller %#llx;", (unsigned long long)serial,
+           m->indirect ? "indirect" : "direct", (unsigned long long)m->arg[0], (unsigned long long)m->arg[1],
+           (unsigned long long)m->arg[2], (unsigned long long)m->caller);
+        for (uint32_t k = 0; ex->prog && k < ex->prog->nstage && k < 6; k++) {
+            const uint8_t *ctl = ex->prog->sd[k].control;
+            const uint8_t *code = (const uint8_t *)(uintptr_t)ex->prog->sd[k].data;
+            int raw = ctl && code && gfx_shader_is_nvn2(ctl);
+            uint64_t hash = raw ? gfx_shader_nvn2_hash(ctl, code) : nvn2_origin(code);
+            sp(&b, " stage[%u]=%016llx%s", k, (unsigned long long)hash, raw ? "(unlowered)" : "");
+        }
+        rt_log("vk: %s targets: %s", b.s ? b.s : "", targets);
+        free(b.s);
+    }
+    if (vk_dump_armed) vk_dump_draw_skip(ex, m->indirect ? "mesh tasks indirect not replayed" : "mesh tasks not replayed");
+}
+
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info) {
     plat_mutex_lock(&rec_lock);
     if (!active()) goto out;
     pass_draws++;
+    if (s->fs) {
+        uint64_t h = shader_hash(s->fs);
+        unsigned i = 0;
+        while (i < npass_fs && pass_fs[i] != h) i++;
+        if (i == npass_fs) {
+            if (npass_fs < sizeof pass_fs / sizeof *pass_fs) pass_fs[npass_fs++] = h;
+            else pass_fs_over++;
+        }
+    }
     uint64_t th = bindings_hash(ex, info);
     for (int i = 0; i < nents; i++)
         if (ents[i].p == p && ents[i].th == th) {
@@ -833,6 +933,10 @@ void vk_dump_pass_end(VkExec *ex) {
         free(ents[i].text);
     }
     if (ents_over) fprintf(passes_f, "  ... %d more draws with other pipeline/texture sets\n", ents_over);
+    for (unsigned i = 0; i < npass_fs; i++)
+        fprintf(passes_f, "  fragment shader fs %016llx\n", (unsigned long long)pass_fs[i]);
+    if (pass_fs_over) fprintf(passes_f, "  ... fragment shader coverage incomplete: %u unlisted draws\n", pass_fs_over);
+    npass_fs = pass_fs_over = 0;
     if (!pass_skip) flush_luts(ex, n);
     else nluts = 0;
     buf_snap(ex, n);
@@ -943,6 +1047,9 @@ out:
 static void make_dirs(char *path) { plat_file_mkdir_p(path); }
 
 void vk_dump_init(void) {
+    skipfs_path = getenv("DKB_SKIP_FS_FILE");
+    vk_dump_skip_fs_on = skipfs_path && *skipfs_path;
+    if (vk_dump_skip_fs_on) rt_log("vk_dump: draws of the fragment shaders listed in %s are left out", skipfs_path);
     const char *e = cfg_get("TOTK_DUMP");
     trigger_path = getenv("TOTK_DUMP_TRIGGER");
     waiting_trigger = trigger_path && *trigger_path;
@@ -962,6 +1069,7 @@ void vk_dump_init(void) {
     }
     const char *d = cfg_get("TOTK_DUMP_DIR");
     snprintf(dir, sizeof dir, "%s", d && *d ? d : "dump");
+    snprintf(base_dir, sizeof base_dir, "%s", dir);
     make_dirs(dir);
     char path[600];
     snprintf(path, sizeof path, "%s/passes.txt", dir);
@@ -993,6 +1101,20 @@ void vk_dump_present(uint64_t frame) {
         if (!signal) return;
         fclose(signal);
         plat_mutex_lock(&rec_lock);
+        if (captures) {   // a re-armed trigger: a fresh folder and log files, the per-capture counters from zero
+            snprintf(dir, sizeof dir, "%s/capture-%d", base_dir, captures + 1);
+            make_dirs(dir);
+            char path[600];
+            snprintf(path, sizeof path, "%s/passes.txt", dir);
+            passes_f = fopen(path, "w");
+            snprintf(path, sizeof path, "%s/images.txt", dir);
+            plat_mutex_lock(&img_lock);
+            images_f = fopen(path, "w");
+            plat_mutex_unlock(&img_lock);
+            if (!passes_f || !images_f) rt_fatal("vk_dump: cannot write to %s", dir);
+            seq = copied = 0, finished = 0, last_targets = 0, nluts_done = 0;
+            __atomic_store_n(&png_bytes, 0, __ATOMIC_RELAXED);
+        }
         dump_frame = frame + 1;
         waiting_trigger = 0;
         plat_mutex_unlock(&rec_lock);
@@ -1013,4 +1135,18 @@ void vk_dump_present(uint64_t frame) {
     passes_f = NULL;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
+    if (trigger_path && *trigger_path) {
+        // Re-arm: deleting the trigger file and making it again captures another frame, into capture-<n> beside the
+        // first. Shader SPIR-V (sh_*.spv) is written once, into the folder of the capture that first listed it; the
+        // TOTK_DUMP_BUF snapshots belong to the first capture only.
+        remove(trigger_path);
+        plat_mutex_lock(&rec_lock);
+        captures++;
+        bd_size = 0;
+        dump_frame = UINT64_MAX;
+        waiting_trigger = 1;
+        plat_mutex_unlock(&rec_lock);
+        rt_log("vk_dump: waiting for trigger %s again; the next capture goes to %s/capture-%d", trigger_path, base_dir,
+               captures + 1);
+    }
 }

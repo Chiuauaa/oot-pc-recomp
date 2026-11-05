@@ -29,6 +29,8 @@
 #undef NVN_PROC
 void nvnp_nvnCommandBufferPushGraphicsConstants(Cpu *c);   // NVN 2 procs the command checks record
 void nvnp_nvnCommandBufferPushComputeConstants(Cpu *c);
+void nvnp_nvnCommandBufferDrawMeshTasks(Cpu *c);
+void nvnp_nvnCommandBufferDrawMeshTasksIndirect(Cpu *c);
 
 typedef struct { const char *name; void (*fn)(Cpu *); } ProcRow;
 static const ProcRow procs[] = {
@@ -445,6 +447,7 @@ static uint64_t record_all(void) {
     REC(OP_SET_SAMP_POOL, CALL(nvnCommandBufferSetSamplerPool, U(c), U(&sp2)));
     REC(OP_COPY_B2T, CALL(nvnCommandBufferCopyBufferToTexture, U(c), 0x9000, U(&tex1), U(&view), U(&rg), 0));
     REC(OP_COPY_STRIDE, CALL(nvnCommandBufferSetCopyRowStride, U(c), 256));
+    REC(OP_COPY_IMAGE_STRIDE, CALL(nvnCommandBufferSetCopyImageStride, U(c), 0x4000));
     REC(OP_BLEND_COLOR, CALL(nvnCommandBufferSetBlendColor, U(c), U(rgba)));
     REC(OP_COPY_T2B, CALL(nvnCommandBufferCopyTextureToBuffer, U(c), U(&tex1), 0, U(&rg), 0xa000, 0));
     REC(OP_COPY_T2T, CALL(nvnCommandBufferCopyTextureToTexture, U(c), U(&tex1), 0, U(&rg), U(&tex2), 0, U(&rg2), 0));
@@ -457,6 +460,8 @@ static uint64_t record_all(void) {
     REC(OP_DRAW_IDX_IND, CALL(nvnCommandBufferDrawElementsIndirect, U(c), NVN_DRAW_PRIMITIVE_TRIANGLES, NVN_INDEX_TYPE_UNSIGNED_INT,
                               0x8000, 0xc000));
     REC(OP_DISPATCH_IND, CALL(nvnCommandBufferDispatchComputeIndirect, U(c), 0xc100));
+    REC(OP_DRAW_MESH, CALL(nvnCommandBufferDrawMeshTasks, U(c), 2, 5, 0));
+    REC(OP_DRAW_MESH, CALL(nvnCommandBufferDrawMeshTasksIndirect, U(c), 0xc180, 0, 0));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferClearBuffer, U(c), 0xc200, 0x40, 0xdeadbeef));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferReportValue, U(c), 0x1234, 0xc300));
     static const uint32_t pushed[4] = {0x39b60b61, 0x3a21d13a, 0x45340000, 0x44ca8000};   // 1/2880, 1/1620, 2880, 1620
@@ -644,6 +649,7 @@ static void parse_all(uint64_t h) {
             break;
         }
         case OP_COPY_STRIDE: CHECK(((const p_copy_stride *)a)->stride == 256, "COPY_STRIDE payload"); break;
+        case OP_COPY_IMAGE_STRIDE: CHECK(((const p_copy_stride *)a)->stride == 0x4000, "COPY_IMAGE_STRIDE payload"); break;
         case OP_BLEND_COLOR: CHECK(((const p_blend_color *)a)->rgba[2] == 0.3f, "BLEND_COLOR payload"); break;
         case OP_COPY_T2B: {
             const p_copy_b2t *p = a;
@@ -687,6 +693,12 @@ static void parse_all(uint64_t h) {
             break;
         }
         case OP_DISPATCH_IND: CHECK(((const p_dispatch_ind *)a)->ind == 0xc100, "DISPATCH_IND payload"); break;
+        case OP_DRAW_MESH: {
+            const p_draw_mesh *p = a;
+            CHECK((!p->indirect && p->arg[0] == 2 && p->arg[1] == 5) || (p->indirect == 1 && p->arg[0] == 0xc180),
+                  "DRAW_MESH payload");
+            break;
+        }
         case OP_CLEAR_BUF: {
             const p_clear_buf *p = a;
             CHECK((p->addr == 0xc200 && p->size == 0x40 && p->value == 0xdeadbeef) ||

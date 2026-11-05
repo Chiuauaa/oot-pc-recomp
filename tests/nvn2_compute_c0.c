@@ -42,6 +42,19 @@ int main(void) {
     CHECK(zero(bank + 0x70, sizeof bank - 0x70), "unbound handles and unused bank bytes start at zero");
 
     memcpy(previous, bank, sizeof bank);
+    const uint32_t dispatch[3] = {1, 3, 5};
+    nvn2_c0_dispatch(bank, dispatch);
+    CHECK(word(bank) == 0 && word(bank + 4) == 1 && word(bank + 8) == 3 && word(bank + 12) == 5,
+          "NVN 2 dispatch counts occupy the header after the reserved word");
+    CHECK(!memcmp(bank + 0x10, previous + 0x10, sizeof bank - 0x10), "dispatch header preserves roots and descriptors");
+    CHECK(((uint64_t)word(bank + 4) << 5) * ((uint64_t)word(bank + 8) << 5) == 3072,
+          "32x32 integration normalizes by dispatched sample count instead of dividing by zero");
+    const uint32_t next_dispatch[3] = {7, 1, 2};
+    nvn2_c0_dispatch(bank, next_dispatch);
+    CHECK(word(bank + 4) == 7 && word(bank + 8) == 1 && word(bank + 12) == 2, "a later dispatch refreshes all counts");
+    CHECK(nvn2_c0_pack(bank, sizeof bank, &l, roots, ssbo, ubo), "repacking clears the prior dispatch header");
+
+    memcpy(previous, bank, sizeof bank);
     l.images = 1;
     CHECK(nvn2_c0_pack(bank, sizeof bank, &l, roots, ssbo, ubo), "changing image count still packs");
     CHECK(!memcmp(previous, bank, 0x70), "image count cannot move or change root/buffer data");

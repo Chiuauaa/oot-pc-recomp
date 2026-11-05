@@ -821,6 +821,19 @@ NVN_API(nvnCommandBufferDispatchCompute) {
 NVN_API(nvnCommandBufferDispatchComputeIndirect) {
     *REC(cmd_of(c), OP_DISPATCH_IND, p_dispatch_ind) = (p_dispatch_ind){arg_x(c, 1), c->x[30]};
 }
+// void nvnCommandBufferDrawMeshTasks(NVNcommandBuffer *cmd, ...) and nvnCommandBufferDrawMeshTasksIndirect(
+// NVNcommandBuffer *cmd, ...) (NVN 2): recorded in command order with their raw arguments (p_draw_mesh), so the replay
+// can place each one in its pass and report the bound task/mesh program. They are not drawn yet. nvn2_mesh_note
+// (nvn_api_nvn2.c) adds the OOT_MESH_LOG record-time log that the other mesh entry points share.
+void nvn2_mesh_note(const char *name, const Cpu *c);
+NVN_API(nvnCommandBufferDrawMeshTasks) {
+    nvn2_mesh_note("DrawMeshTasks", c);
+    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) = (p_draw_mesh){{arg_x(c, 1), arg_x(c, 2), arg_x(c, 3)}, 0, 0, c->x[30]};
+}
+NVN_API(nvnCommandBufferDrawMeshTasksIndirect) {
+    nvn2_mesh_note("DrawMeshTasksIndirect", c);
+    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) = (p_draw_mesh){{arg_x(c, 1), arg_x(c, 2), arg_x(c, 3)}, 1, 0, c->x[30]};
+}
 // void nvnCommandBufferClearBuffer(NVNcommandBuffer *cmd, NVNbufferAddress addr, size_t size, uint32_t value)
 NVN_API(nvnCommandBufferClearBuffer) {
     *REC(cmd_of(c), OP_CLEAR_BUF, p_clear_buf) = (p_clear_buf){arg_x(c, 1), arg_x(c, 2), (uint32_t)arg_x(c, 3), 0};
@@ -1103,7 +1116,7 @@ const char *nvn_op_name(uint32_t op) {
         "BIND_VSTREAM", "BIND_VBUF", "BIND_UBO", "BIND_SSBO", "BIND_TEX", "BIND_SAMP", "STENCIL", "POLY_OFFSET", "DRAW",
         "DRAW_IDX", "DISPATCH", "BARRIER", "SET_TEX_POOL", "SET_SAMP_POOL", "COPY_B2T", "COPY_STRIDE", "BLEND_COLOR",
         "COPY_T2B", "BIND_IMG", "COPY_T2T", "RESET_COUNTER", "CLEAR_TEX", "DEPTH_CLAMP", "RENDER_ENABLE",
-        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "PUSH_CONST", "WAIT_SYNC", "COPY_IMAGE_STRIDE",
+        "RASTER_DISCARD", "RENDER_COND", "PRIM_RESTART", "DRAW_IDX_IND", "DISPATCH_IND", "CLEAR_BUF", "PUSH_CONST", "WAIT_SYNC", "COPY_IMAGE_STRIDE", "DRAW_MESH",
     };
     _Static_assert(sizeof names / sizeof *names == OP_COUNT_, "one name per op");
     return op < OP_COUNT_ ? names[op] : "?";

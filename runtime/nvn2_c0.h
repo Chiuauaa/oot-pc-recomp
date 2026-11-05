@@ -9,6 +9,13 @@
 #define NVN2_C0_BYTES 0x800u
 #define NVN2_ROOT_TABLES 8
 #define NVN2_ROOT_WORDS 64
+#define NVN2_C0_DISPATCH_OFFSET 4u
+
+// NVN 2 compute reads the workgroup counts at c0+4/+8/+12. These are dispatch counts, not texture dimensions
+// or local thread counts. Keep them in the driver header, before the declared root tables at +0x10.
+static inline void nvn2_c0_dispatch(uint8_t *bank, const uint32_t dispatch[3]) {
+    memcpy(bank + NVN2_C0_DISPATCH_OFFSET, dispatch, 3 * sizeof *dispatch);
+}
 
 typedef struct {
     uint8_t images, ubos, ssbos, textures;

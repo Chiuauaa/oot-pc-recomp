@@ -91,6 +91,11 @@ typedef struct { uint64_t target; } p_jump;                // OP_JUMP / OP_CALL:
 // instance} (VkDrawIndexedIndirectCommand's layout), read by the GPU when the draw runs
 typedef struct { int32_t prim, itype; uint64_t ibuf, ind; } p_draw_idx_ind;
 typedef struct { uint64_t ind, caller; } p_dispatch_ind;   // OP_DISPATCH_IND: ind = GPU address of the 3 group counts
+// OP_DRAW_MESH: NVN 2 DrawMeshTasks (indirect 0) or DrawMeshTasksIndirect (indirect 1). arg holds the call's raw
+// arguments after the command buffer, because their meaning is not yet confirmed: Eglantine (NX2_NOTES.md row 89,
+// fix/oot-fog EDEN_NX2_MESH_FIRST) takes a direct draw as task workgroups [first, first + count - 1], and an indirect
+// one reads its counts at a GPU address. The replay does not draw these yet; it counts them and names their program.
+typedef struct { uint64_t arg[3]; int32_t indirect, pad; uint64_t caller; } p_draw_mesh;
 // OP_CLEAR_BUF: size bytes at addr filled with the 32-bit value in GPU order (ClearBuffer; ReportValue is a 4-byte one)
 typedef struct { uint64_t addr, size; uint32_t value, pad; } p_clear_buf;
 // OP_PUSH_CONST: NVN 2 Push{Graphics,Compute}Constants; bytes at byte offset into root table `table` of the graphics

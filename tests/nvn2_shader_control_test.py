@@ -133,7 +133,7 @@ int main(void) {
     int checks = 0, failures = 0;
 #define CHECK(c) do { checks++; if (!(c)) { failures++; fprintf(stderr, "shader control: failed check %d\n", checks); } } while (0)
     CHECK(!req_init(&req, GFX_STAGE_CS, short_control, code, sizeof code, NULL, &answers) &&
-          error && strstr(error, "NVN 2 program"));
+          error && strstr(error, "native Ampere stage was not lowered"));
     memcpy(full + NVN2_C0_LAYOUT, "DKC0", 4);
     error = NULL;
     CHECK(!req_init(&req, GFX_STAGE_CS, full, code, sizeof code, NULL, &answers) &&
@@ -266,6 +266,8 @@ int main(void) {
     pieces.append(production[flags_start:production.index('};', flags_start) + 2])
     pieces += [function(production, name) for name in (
         'static int geometry_spirv(', 'static int storage_contract_version(', 'int gfx_shader_is_nvn2(',
+        # req_init names a rejected native stage by its dump hash.
+        'static int nvn2_sizes(', 'uint64_t gfx_shader_nvn2_hash(',
         'static int req_init(', 'static size_t build_request(')]
     pieces.append(function(production[production.rindex('static int reflect('):], 'static int reflect('))
     pieces += [function(production,name) for name in (

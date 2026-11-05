@@ -1082,12 +1082,14 @@ static void c0_table(uint8_t *at, const p_bind_buf b[16]) {
 // candidate base from here and compares the global pointer against it. Compute: dispatch size at 0x200, the uniform
 // buffer table at 0x210 + 16 r. Graphics: the largest point size (Maxwell's limit, GLSLC clamps gl_PointSize to it) at
 // 0x610, the base instance at 0x644. Other stages: zeros. Unbound slots read zero, since the replay keeps them zero.
-// Layout: nxnative dm/gfx/nvn/nvn_mtl.m (MIT).
+// NVN 2 compute uses nvn2_c0.h instead: dispatch counts in its 16-byte header, then declared roots and tables.
+// NVN 1 layout: nxnative dm/gfx/nvn/nvn_mtl.m (MIT).
 void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16], const p_bind_buf ubo[16],
                 const uint32_t dispatch[3], uint32_t base_instance) {
     if (stage == NVN_STAGE_CS && c0_lay) {
         if (!nvn2_c0_pack(bank, VK_C0_BYTES, c0_lay, c0_push, ssbo, ubo))
             rt_fatal("vk: invalid NVN 2 compute parameter-block layout");
+        nvn2_c0_dispatch(bank, dispatch);
         return;
     }
     memset(bank, 0, VK_C0_BYTES);
@@ -2668,7 +2670,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
-    s.vs = vs, s.fs = fs, s.gs = gs;
+    s.vs = vs, s.fs = gfx_shader_debug_override(fs, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED)), s.gs = gs;
     s.feedback = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
     s.prim = (uint8_t)prim;
     s.depth_minus_w = (uint8_t)(nvn_depth_minus_w() != 0);
@@ -2736,6 +2738,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (vk_dump_armed) vk_dump_draw_skip(ex, "pipeline creation failed");
         return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
     }
+    if (vk_dump_skip_fs_on && vk_dump_skip_fs(s.fs)) return 0;   // DKB_SKIP_FS_FILE diagnostic (vk_dump.c)
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
@@ -3191,9 +3194,8 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (vk_dump_armed) vk_dump_dispatch(ex, cs, p, info, d);
 }
 
-// DispatchComputeIndirect: vkCmdDispatchIndirect from the pool buffer. NVN 1 shaders read the group counts at c0+0x200,
-// so they are copied there on the GPU before dispatch. That NVN 1 offset can hold declared roots or resource tables
-// in NVN 2; leave its packed bank unchanged rather than overwrite it with the legacy copy.
+// DispatchComputeIndirect: copy the actual GPU arguments into the dispatch-count words of a fresh driver bank,
+// at +0x200 for NVN 1 or +4 in the NVN 2 header. Roots and resource tables remain outside that copy.
 static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
     VkMemSpan ip;
@@ -3216,8 +3218,8 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     twin_dispatch = 1;
     bind_resources(ex, info);
     twin_dispatch = 0;
-    if (!c0_lay && B.c0_valid[2]) {   // the NVN 1 shader binds c0
-        VkBufferCopy cp = {ip.offset, B.c0_off[2] + 0x200, sizeof(VkDispatchIndirectCommand)};
+    if (B.c0_valid[2]) {   // the shader binds c0
+        VkBufferCopy cp = {ip.offset, B.c0_off[2] + (c0_lay ? NVN2_C0_DISPATCH_OFFSET : 0x200), sizeof(VkDispatchIndirectCommand)};
         vkCmdCopyBuffer(ex->cb, ip.buffer, B.c0_buf[2], 1, &cp);
         ex->recorded++;
         vk_exec_barrier(ex);
