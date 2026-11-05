@@ -3092,6 +3092,33 @@ static void upscale_standin(VkExec *ex) {
     if (!told++) rt_log("tensor: upscale stand-in blits %ux%u to %ux%u (formats %d -> %d, usage %#x -> %#x)", up_src.w, up_src.h, w, h, (int)up_src.format, (int)dst_format, (unsigned)up_src.usage, (unsigned)dst_usage);
 }
 
+// A compute dispatch the replay skips because its shader has no translation: the first one of each of 64 programs gets a
+// line with the storage images and storage buffers it would have written, so a picture or a GPU-computed value (an
+// exposure, a light list) that never gets written names the program to fix.
+static void skipped_dispatch_log(VkExec *ex, const char *kind, int x, int y, int z) {
+    static uint64_t seen[64];
+    static int nseen;
+    uint64_t serial = ex->prog ? ex->prog->serial : 0;
+    for (int i = 0; i < nseen; i++) if (seen[i] == serial) return;
+    if (nseen == 64) return;
+    seen[nseen++] = serial;
+    char s[768];
+    int o = snprintf(s, sizeof s, "vk: skipped %s dispatch %dx%dx%d of program %llu:", kind, x, y, z, (unsigned long long)serial);
+    vk_texture_lock();
+    for (int slot = 0; slot < 32 && o < (int)sizeof s - 64; slot++) {
+        uint64_t h = ex->img[NVN_STAGE_CS][slot];
+        const VkTexImage *t = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL) : NULL;
+        if (t) o += snprintf(s + o, sizeof s - o, " img%d=%ux%u/f%d@%#llx", slot, t->width, t->height, (int)t->format,
+                             (unsigned long long)t->addr);
+    }
+    vk_texture_unlock();
+    for (int slot = 0; slot < 16 && o < (int)sizeof s - 48; slot++)
+        if (ex->ssbo[NVN_STAGE_CS][slot].addr)
+            o += snprintf(s + o, sizeof s - o, " ssbo%d=%#llx+%#llx", slot, (unsigned long long)ex->ssbo[NVN_STAGE_CS][slot].addr,
+                          (unsigned long long)ex->ssbo[NVN_STAGE_CS][slot].size);
+    rt_log("%s", s);
+}
+
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     static int skip = -1;   // DKB_SKIP_COMPUTE=1: drop every direct dispatch (bisecting GPU faults)
@@ -3146,7 +3173,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     dummies_init();
     int present;
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);   // synchronous: a skipped dispatch changes results
-    if (!cs) return;
+    if (!cs) return skipped_dispatch_log(ex, "direct", d->x, d->y, d->z);
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
@@ -3176,7 +3203,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     dummies_init();
     int present;
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);
-    if (!cs) return;
+    if (!cs) return skipped_dispatch_log(ex, "indirect", 0, 0, 0);
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
