@@ -304,9 +304,12 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         }
         RegisterPressure pressure{insn};
         bool requires_shadow = false;
+        // ISBEWR (0x927) keeps its data register in bits 32-39 and is checked like the register forms: a mesh program
+        // that stores an attribute from a register at or above the uniform bank would otherwise store the UR mirror's
+        // bit mask, which reads as NaN (Lichii b32847784, "Ocarina door NaN": the bloom spread it as a white glow).
         for (u32 bit : {16U, 24U, 32U, 64U}) {
             if (opcode == 0x81c) break;
-            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988) continue;
+            if (bit == 32 && insn.Bits(9, 3) != 1 && opcode != 0xb60 && opcode != 0xb66 && opcode != 0x986 && opcode != 0x987 && opcode != 0xf66 && opcode != 0x988 && opcode != 0x927) continue;
             const u32 reg = insn.Bits(bit, 8);
             if (reg >= (uses_uniform_bank ? high_uniform_base : 246U) && reg < 255)
                 requires_shadow = true;

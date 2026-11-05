@@ -2,6 +2,25 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 5 November 2026 (evening): the white world was Bananza's light-quad filter
+
+- **Cause of the blown-out, flickering world:** `light_quad_fault_skip` (vk_exec_draw.c), inherited from Donkey Kong
+  Bananza, skips on NVIDIA the draws of NVN 2 stage `cae0ef8e9fe9147f` and every quad with a Location 9 input whose
+  fragment stage reads storage at c0+0x530 (a Bananza workaround for a device loss). Ocarina draws its ordinary world
+  materials through that shape, so they were dropped, the scene colour target stayed black there and the full-screen
+  sky draw (fs `6ebc82e7c1dbab6f`, HDR sun up to ~46, no depth test) showed through as white. The filter is now off
+  unless `TOTK_FIX_VS_FAULT=1`; with it off the lights came back (user, in game).
+- How it was found: the dump of frame 5015 showed the scene colour black before pass 141, a single sky draw writing
+  1.5-46 into every pixel, and a 118-draw world pass whose output was silhouettes. `vk_dump` now prints each draw's
+  depth test, write and function.
+- Kept off by default, for A/B tests: `OOT_SKY_DEPTH=1` (depth-test the sky draw), `OOT_FOG_SCALE` and `OOT_EXPOSURE`
+  (Lichii's exp/oot-visual-workaround: fog integration compute `a4550cb09fe72248` slice distance, composite
+  `65156d0c69e40c69` exposure constant c3[3].z; SPIR-V edits in vk_pipeline.c `oot_visual_patch`).
+- Lichii build 75 (c9ebb5c) does not fix the haze either (its known issues list it); #100 (ISBEWR data registers) is
+  ported in `lower_to_maxwell.h`.
+- Still open: pale, banded shadows (shadow lookups through bindless pool arrays: 32-entry stand-ins), dropped mesh
+  draws, neural upscaler stand-in.
+
 ## 5 November 2026 (afternoon): the world renders on Linux
 
 - **State:** Zuriel-Zurichi's `fix/oot-rendering-3d` (c3ad87b: NVN view formats, RGB9E5, followed-texture formats,

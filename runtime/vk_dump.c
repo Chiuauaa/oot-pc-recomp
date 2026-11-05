@@ -54,7 +54,7 @@ static int waiting_trigger;
 static char dir[400];
 static FILE *passes_f, *images_f;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
-static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO
+static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO (2: 64 vec4 per block, else 16)
 static uint32_t want_tex[16][2];       // TOTK_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -611,7 +611,7 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             if (u->addr && vk_mem_resolve(u->addr, 1, &ms)) {
                 uint64_t n = u->size && u->size < ms.avail ? u->size : ms.avail;
                 const float *f = (const float *)(uintptr_t)u->addr;
-                for (uint64_t k = 0; k < 16 && (k + 1) * 16 <= n; k++)
+                for (uint64_t k = 0; k < (uint64_t)(dump_ubo > 1 ? 64 : 16) && (k + 1) * 16 <= n; k++)
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
             } else {
@@ -753,7 +753,8 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
         uint64_t o = nvn2_origin((const uint8_t *)(uintptr_t)ex->prog->sd[k].data);
         if (o) sp(&b, " nvn2 %016llx", (unsigned long long)o);
     }
-    sp(&b, "\n");
+    sp(&b, " | depth test %d write %d func %u (vk %d) stencil %d\n", (int)s->ds.dt, (int)s->ds.dw,
+       (unsigned)s->ds.df, (int)(s->ds.df >= 1 && s->ds.df <= 8 ? (int)s->ds.df - 1 : 7), (int)s->ds.st);
     describe_bindings(&b, ex, info);
     ents[nents++] = (Ent){p, th, 1, b.s};
 out:
@@ -851,9 +852,13 @@ void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPip
     last_targets = 0;
     Str b = {0};
     describe_bindings(&b, ex, info);
-    fprintf(passes_f, "pass %04d: dispatch %dx%dx%d cs %016llx prog %llu caller %#llx, fence %llu\n%s", n, d->x, d->y,
-            d->z, (unsigned long long)shader_hash(cs), (unsigned long long)(ex->prog ? ex->prog->serial : 0),
-            (unsigned long long)d->caller, (unsigned long long)ex->fence, b.s ? b.s : "");
+    uint64_t native = 0;   // the program's native (Ampere) stage name, as DKB_SHADER_DUMP and Lichii call it
+    for (uint32_t k = 0; ex->prog && k < ex->prog->nstage && k < 6 && !native; k++)
+        native = nvn2_origin((const uint8_t *)(uintptr_t)ex->prog->sd[k].data);
+    fprintf(passes_f, "pass %04d: dispatch %dx%dx%d cs %016llx native %016llx prog %llu caller %#llx, fence %llu\n%s", n,
+            d->x, d->y, d->z, (unsigned long long)shader_hash(cs), (unsigned long long)native,
+            (unsigned long long)(ex->prog ? ex->prog->serial : 0), (unsigned long long)d->caller,
+            (unsigned long long)ex->fence, b.s ? b.s : "");
     free(b.s);
     for (uint32_t i = 0; i < info->n_bindings && !pass_skip; i++) {   // storage images the dispatch writes
         const VkPipeBinding *bd = &info->bindings[i];
@@ -953,7 +958,7 @@ void vk_dump_init(void) {
     const char *sr = cfg_get("TOTK_DUMP_SKIP_RUNS");
     skip_runs = sr && *sr && *sr != '0';
     const char *du = cfg_get("TOTK_DUMP_UBO");
-    dump_ubo = du && *du && *du != '0';
+    dump_ubo = du && *du && *du != '0' ? (*du == '2' ? 2 : 1) : 0;
     const char *wt = cfg_get("TOTK_DUMP_TEX");
     for (char *q = (char *)wt; q && *q && nwant_tex < 16; q += *q == ',') {
         uint32_t *w = want_tex[nwant_tex++];

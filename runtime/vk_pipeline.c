@@ -1062,13 +1062,96 @@ static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShader
     st->pNext = rq;
 }
 
+// ---- Ocarina of Time visual workaround (Lichii's exp/oot-visual-workaround, temporary)
+// The outdoor haze and exposure are too strong and the root cause is open. Lichii scales two values by hand:
+// - the fog integration compute (SPIR-V FNV a4550cb09fe72248): the per-slice integration distance (id 367, an OpFAdd)
+//   by OOT_FOG_SCALE, default 0.25;
+// - the log-bloom composite fragment (65156d0c69e40c69): the three loads of the exposure constant (c3 offset 0x38,
+//   ids 148, 179, 210) by OOT_EXPOSURE, default 0.65.
+// A scale of 1 leaves a shader alone. The edit renames the instruction's result id and follows it with an OpFMul that
+// defines the old id, so every use sees the scaled value.
+static float oot_scale_env(const char *name, float dflt) {
+    const char *e = getenv(name);
+    return e && *e ? (float)atof(e) : dflt;
+}
+
+static uint32_t *oot_scale_ids(const uint32_t *w, uint64_t words, const uint32_t *ids, int nids, float factor,
+                               uint64_t *out_n) {
+    uint32_t bound = w[3], fty = 0, first_fn = 0;
+    for (uint64_t i = 5; i < words;) {
+        uint32_t op = w[i] & 0xffff, n = w[i] >> 16;
+        if (!n || i + n > words) return NULL;
+        if (op == 22 && n == 3 && w[i + 2] == 32 && !fty) fty = w[i + 1];   // OpTypeFloat 32
+        if (op == 54 && !first_fn) first_fn = (uint32_t)i;                   // OpFunction
+        i += n;
+    }
+    if (!fty || !first_fn) return NULL;
+    uint32_t cid = bound++, fresh[8];
+    if (nids > 8) return NULL;
+    uint32_t *o = malloc(((size_t)words + 4 + (size_t)nids * 5) * 4);
+    if (!o) return NULL;
+    uint64_t k = 0;
+    union { float f; uint32_t u; } fv = {factor};
+    int done = 0;
+    for (uint64_t i = 0; i < words;) {
+        uint32_t op = i < 5 ? 0 : (w[i] & 0xffff), n = i < 5 ? 5 : (w[i] >> 16);
+        if (i == first_fn) {
+            o[k++] = 4u << 16 | 43, o[k++] = fty, o[k++] = cid, o[k++] = fv.u;   // OpConstant
+        }
+        uint64_t base = k;
+        memcpy(o + k, w + i, (size_t)n * 4), k += n;
+        if (i >= 5 && (op == 61 || op == 129) && n >= 4) {   // OpLoad, OpFAdd: result id at word 2
+            for (int j = 0; j < nids; j++)
+                if (w[i + 2] == ids[j] && w[i + 1] == fty) {
+                    fresh[j] = bound++;
+                    o[base + 2] = fresh[j];
+                    o[k++] = 5u << 16 | 133, o[k++] = fty, o[k++] = ids[j], o[k++] = fresh[j], o[k++] = cid;   // OpFMul
+                    done++;
+                }
+        }
+        i += n;
+    }
+    if (done != nids) {
+        free(o);
+        return NULL;
+    }
+    o[3] = bound;
+    *out_n = k;
+    return o;
+}
+
+static uint32_t *oot_visual_patch(const uint32_t *w, uint64_t words, uint64_t *out_n) {
+    static float fog = -1, expo = -1;
+    if (fog < 0) fog = oot_scale_env("OOT_FOG_SCALE", 1.0f), expo = oot_scale_env("OOT_EXPOSURE", 1.0f);
+    if (words < 64 || words > (1u << 20) || (fog == 1 && expo == 1)) return NULL;
+    // cheap filter first: both shaders are far from tiny and the hash walks every byte
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint8_t *b = (const uint8_t *)w;
+    for (uint64_t i = 0; i < words * 4; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    uint32_t *r = NULL;
+    if (h == 0xa4550cb09fe72248ull && fog != 1) {
+        static const uint32_t ids[] = {367};
+        r = oot_scale_ids(w, words, ids, 1, fog, out_n);
+        rt_log("oot visual workaround: fog integration scaled by %g (%s)", (double)fog, r ? "applied" : "FAILED");
+    } else if (h == 0x65156d0c69e40c69ull && expo != 1) {
+        static const uint32_t ids[] = {148, 179, 210};
+        r = oot_scale_ids(w, words, ids, 3, expo, out_n);
+        rt_log("oot visual workaround: composite exposure scaled by %g (%s)", (double)expo, r ? "applied" : "FAILED");
+    }
+    return r;
+}
+
 static VkShaderModule make_module_linked(const uint32_t *w, uint64_t words, int geometry_chain) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = geometry_chain ? spirv_fixup_linked(w, words, &fixed_n, 1) : spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
+    uint64_t vis_n = 0;
+    uint32_t *vis = oot_visual_patch(w, words, &vis_n);
+    if (vis) w = vis, words = vis_n;
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)words * 4, .pCode = w};
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
+    free(vis);
     free(fixed);
     return r == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
@@ -3636,10 +3719,31 @@ int vk_pipeline_warm_shaders(void) {
 
 // ---- dynamic state
 
+// The Ocarina sky draw (fragment shader SPIR-V FNV 6ebc82e7c1dbab6f): one full-screen draw that writes the HDR sun/horizon
+// colour (up to ~46) into every pixel of the scene target, geometry or not. It must be depth tested against the prepass,
+// otherwise it paints over the world (OOT_SKY_DEPTH=0 turns the override off).
+static int is_sky_fs(const GfxShader *fs) {
+    static struct { const GfxShader *s; int sky; } tab[256];
+    static int n, on = -1;
+    if (on < 0) { const char *e = getenv("OOT_SKY_DEPTH"); on = e && *e == '1'; }
+    if (!on || !fs) return 0;
+    for (int i = 0; i < n; i++)
+        if (tab[i].s == fs) return tab[i].sky;
+    uint64_t words = 0, h = 0xcbf29ce484222325ull;
+    const uint32_t *w = gfx_shader_spirv(fs, &words);
+    const uint8_t *b = (const uint8_t *)w;
+    for (uint64_t i = 0; w && i < words * 4; i++) h = (h ^ b[i]) * 0x100000001b3ull;
+    int sky = h == 0x6ebc82e7c1dbab6full;
+    if (n < 256) tab[n].s = fs, tab[n].sky = sky, n++;
+    return sky;
+}
+
 void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) {
     if (!ensure_init()) return;
     const poly_st *pl = &s->poly;
-    const ds_st *d = &s->ds;
+    ds_st dsx = s->ds;
+    (void)is_sky_fs;   // the sky depth override is off: the real cause was the light-quad filter
+    const ds_st *d = &dsx;
     // The front face maps unchanged: TOTK sets the upper-left window origin, and the y-flipped viewport (y_flip) puts
     // NDC +y at row 0 as NVN does, so the framebuffer winding Vulkan tests is the one NVN tests (MacNativeGames passes
     // it to Metal unchanged; LAS Recomp exec.c mirrors it only for the lower-left origin).

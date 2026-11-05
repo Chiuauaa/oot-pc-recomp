@@ -2422,7 +2422,13 @@ static int stage_diag_skip(const VkExec *ex, const GfxShader *vs) {
 
 static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     static int on = -1;
-    if (on < 0) on = !rt_game_version && cfg_bool("TOTK_FIX_VS_FAULT") && vk_ctx()->props.vendorID == 0x10de;   // 0: Bananza
+    // Inherited from Bananza, where these quads lost the device on NVIDIA. Ocarina draws its ordinary world materials
+    // through the same shape (Location 9 input, c0+0x530 storage), so the filter dropped them and the sky showed where
+    // they belong. Off unless TOTK_FIX_VS_FAULT=1 asks for it.
+    if (on < 0) {
+        const char *e = getenv("TOTK_FIX_VS_FAULT");
+        on = !rt_game_version && e && *e == '1' && vk_ctx()->props.vendorID == 0x10de;
+    }
     if (!on || !vs || !fs) return 0;
     const uint8_t *ctl, *code = NULL;
     uint32_t len;
