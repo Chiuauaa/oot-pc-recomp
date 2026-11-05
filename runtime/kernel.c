@@ -108,6 +108,7 @@ struct RtThread {
 };
 
 static PlatMutex G = PLAT_MUTEX_INIT;
+static void stall_arm(void);
 static struct { int type; void *obj; } g_h[MAX_H];
 static _Thread_local RtThread *tcur;
 _Static_assert(offsetof(RtThread, preempt) == 0, "host.h kern_preempt_pending reads the first int");
@@ -1405,6 +1406,7 @@ static void thr_link(RtThread *t) {   // holding G
     t->all = g_all;
     g_all = t;
     g_created++;
+    stall_arm();
 }
 
 static void thr_free(RtThread *t) {   // holding G; t has exited and its handle is closed
@@ -2273,3 +2275,47 @@ HOST_OVERRIDE(KERN_SYM_INITIALIZE_FIBER, kern_fiber_initialize);
 HOST_OVERRIDE(KERN_SYM_FINALIZE_FIBER, kern_fiber_finalize);
 HOST_OVERRIDE(KERN_SYM_SWITCH_TO_FIBER, kern_fiber_switch);
 HOST_OVERRIDE(KERN_SYM_GET_CURRENT_FIBER, kern_fiber_current);
+
+// TOTK_STALL_AT=<s>[,<s>...]: at those seconds after the first guest thread, a report of what every guest thread is
+// doing, for a game that is alive but waits for something that never happens (the title's New Game, say).
+static const char *const wait_name[] = {"-", "lock", "condvar", "address", "sync"};
+
+static void stall_report(unsigned sec) {
+    lock();
+    rt_log("stall: ---- guest threads at %us ----", sec);
+    for (RtThread *t = g_all; t; t = t->all) {
+        char e[96];
+        if (t->exited) continue;
+        const char *w = t->wkind >= 0 && t->wkind < 5 ? wait_name[t->wkind] : "?";
+        if (t->wkind == W_NONE)
+            rt_log("stall: h%#x prio %d core %d %-7s entry %s", t->handle, t->prio, t->cur_core, "running/host",
+                   ldr_describe(t->entry, e, sizeof e));
+        else
+            rt_log("stall: h%#x prio %d core %d waits %-7s on %#llx (obj %#llx) entry %s", t->handle, t->prio, t->cur_core,
+                   w, (unsigned long long)t->waddr, (unsigned long long)t->wobj, ldr_describe(t->entry, e, sizeof e));
+    }
+    unlock();
+}
+
+static void stall_thread(void *arg) {
+    (void)arg;
+    const char *list = cfg_get("TOTK_STALL_AT");
+    unsigned at[16], n = 0;
+    for (const char *q = list; q && *q && n < 16;) {
+        at[n++] = (unsigned)strtoul(q, (char **)&q, 10);
+        if (*q == ',') q++;
+        else break;
+    }
+    unsigned done = 0;
+    for (unsigned i = 0; i < n; i++) {
+        if (at[i] > done) plat_sleep_ms((at[i] - done) * 1000u);
+        done = at[i];
+        stall_report(at[i]);
+    }
+}
+
+static void stall_arm(void) {
+    static int armed;
+    if (armed++ || !cfg_get("TOTK_STALL_AT")) return;
+    plat_thread_spawn(stall_thread, NULL, "stall", 0);
+}

@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -20,7 +21,7 @@ constexpr size_t kC0Layout = 0x860;  // "DKC1" + compute parameter layout (gfx_s
 constexpr uint64_t kMaxwellNop = 0x50b0000000070f00ull;
 constexpr uint64_t kMaxwellExit = 0xe30000000007000full;
 
-struct Lowered { std::vector<uint8_t> control; std::vector<uint64_t> code; uint64_t origin; };
+struct Lowered { std::vector<uint8_t> control; std::vector<uint64_t> code; uint64_t origin; bool tensor = false; };
 std::mutex lock;
 // Keyed by content, not by address: a game frees program memory and loads other shaders at the same place (a scene
 // change), and an address key handed those the old lowering. The key is gfx_shader_nvn2_hash (the dump name).
@@ -29,6 +30,16 @@ std::map<uint64_t, Lowered *> cache;
 // Lowered code buffer -> its key, for nvn2_origin: the draw path asks it on every draw (vk_exec_draw.c
 // light_quad_fault_skip), and a scan of the cache there cost most of the render thread in heavy scenes.
 std::unordered_map<const uint8_t *, uint64_t> origins;
+// Lowered code buffers of stages that use the tensor cores (HMMA, LDSM). The game's DLSS-style upscaler is a chain of
+// them; without tensor cores each HMMA expands to dozens of shuffles, so one such stage is tens of MB of SPIR-V.
+std::unordered_set<const uint8_t *> tensor_stages;
+bool uses_tensor(const std::vector<Shader::Ampere::Instruction> &native) {
+    for (const auto &insn : native) {
+        const uint32_t op = insn.Bits(0, 12);
+        if (op == 0x23c || op == 0x83b) return true;   // HMMA.16816/.1688, LDSM
+    }
+    return false;
+}
 
 void put32(std::vector<uint8_t> &c, size_t at, uint32_t v) { std::memcpy(c.data() + at, &v, 4); }
 
@@ -68,6 +79,7 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
     }
 
     auto *out = new Lowered;
+    out->tensor = uses_tensor(native);
     auto &m = out->code;
     // The lowering places instruction 0 at 0x10 modulo 32 with a scheduling word at every 32-byte boundary. Ryujinx
     // decodes from the code start (graphics: SPH+0x50, compute: 0) and takes every 32-byte boundary counted from there
@@ -166,6 +178,7 @@ extern "C" int nvn2_lower(const uint8_t *control, const uint8_t *code, const uin
     if (fresh && (it->second = lower(control, code))) {
         it->second->origin = key;
         origins.emplace(reinterpret_cast<const uint8_t *>(it->second->code.data()), key);
+        if (it->second->tensor) tensor_stages.insert(reinterpret_cast<const uint8_t *>(it->second->code.data()));
     }
     if (!it->second) return 0;
     *out_control = it->second->control.data();
@@ -179,4 +192,10 @@ extern "C" uint64_t nvn2_origin(const uint8_t *code) {
     std::lock_guard<std::mutex> g(lock);
     auto it = origins.find(code);
     return it == origins.end() ? 0 : it->second;
+}
+
+// 1 when a lowered code buffer is a stage that uses the tensor cores (HMMA/LDSM).
+extern "C" int nvn2_is_tensor(const uint8_t *code) {
+    std::lock_guard<std::mutex> g(lock);
+    return tensor_stages.count(code) != 0;
 }

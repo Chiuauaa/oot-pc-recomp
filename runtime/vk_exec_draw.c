@@ -2792,6 +2792,18 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (skip < 0) skip = getenv("DKB_SKIP_COMPUTE") != NULL;
     if (skip) return;
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
+    // OOT_SKIP_TENSOR=1: drop the dispatches of tensor-core stages (the game's neural upscaler) before the shader is
+    // translated. Measures what the upscaler costs on a GPU without tensor cores.
+    static int skip_tensor = -1;
+    if (skip_tensor < 0) skip_tensor = getenv("OOT_SKIP_TENSOR") != NULL;
+    if (skip_tensor) {
+        for (uint32_t k = 0; k < ex->prog->nstage; k++)
+            if (nvn2_is_tensor((const uint8_t *)(uintptr_t)ex->prog->sd[k].data)) {
+                static int told;
+                if (!told++) rt_log("tensor: neural upscaler dispatches are skipped (OOT_SKIP_TENSOR)");
+                return;
+            }
+    }
     cb_res(ex);
     dummies_init();
     int present;
