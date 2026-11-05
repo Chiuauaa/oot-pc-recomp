@@ -711,6 +711,10 @@ class Lifter:
                 9: f'{a} >> ({b} & {size - 1})',
                 10: f'(uint{size}_t)((int{size}_t){a} >> ({b} & {size - 1}))',
                 11: f'ROR{size}({a}, {b} & {size - 1})',
+                # PACGA: pointers are never signed on the host, so the tag only has to be a deterministic function
+                # of (Xn, Xm) in bits 63:32 with the low half zero, which is the shape of the real result.
+                12: (f'((({a} + {b} * 0x9E3779B97F4A7C15ull) * 0xBF58476D1CE4E5B9ull) & 0xFFFFFFFF00000000ull)'
+                     if sf else None),
             }.get(opcode)
             if expr is None:
                 raise Unsupported('dp2')

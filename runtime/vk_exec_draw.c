@@ -819,7 +819,10 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
 // does; a stage whose real mask differs would forward the wrong set.
 static int native_gs_on(void) {
     static int on = -1;
-    if (on < 0) on = cfg_bool("TOTK_NATIVE_GS");
+    if (on < 0) {
+        on = cfg_bool("TOTK_NATIVE_GS");
+        rt_log("native GS: %s", on ? "Bananza passthrough geometry enabled" : "disabled");
+    }
     return on;
 }
 

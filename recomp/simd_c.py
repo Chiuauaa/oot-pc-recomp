@@ -4,7 +4,8 @@
 Every encoding is decoded here at lift time and turned into C over the Cpu struct, calling the static
 inline helpers in runtime/simd.h with constant fields (sizes, lanes, ops), so clang folds the helpers'
 switches. Covers ARMv8.0-A + Crypto + CRC32 (the Switch's Cortex-A57); unallocated or later-architecture
-encodings (FP16 arithmetic, RDM, dot product, FCMA, JSCVT, ...) raise Unsupported.
+encodings (FP16 arithmetic, RDM, FCMA, JSCVT, ...) raise Unsupported. OoT Recomp adds the ones its game uses:
+SDOT/UDOT (vector) and FP16 FNEG/FABS (vector).
 """
 from lifter import COND_NAMES, Unsupported, W, X, XS, bits, extend_expr, hx, set_reg, sext
 
@@ -174,6 +175,10 @@ class SimdC:
                 return self.shift_imm(w)
             if (op1 & 2) and not (op3 & 1):
                 return self.indexed(w)
+            if not (op1 & 2) and not (op2 & 4) and (op3 & 0b000100001) == 0b000100001:
+                return self.three_ext(w)
+            if not (op1 & 2) and (op2 & 7) == 7 and (op3 & 0b110000011) == 0b10:
+                return self.misc2_fp16(w)
             raise Unsupported(f'simd vector {w:08x}')
         if (op0 & 0b0101) == 0b0001:  # scalar FP
             if bits(w, 29, 1) or (bits(w, 31, 1) and (op1 & 2 or (op2 & 4 and op3 & 0b111111))):
@@ -503,6 +508,22 @@ class SimdC:
                    m, sz, off)
 
     # ------------------------------------------------------------ two-register misc
+
+    def three_ext(self, w):
+        """Advanced SIMD three-register extension (ARMv8.2 DotProd: SDOT/UDOT, vector form, 4S from 16B)."""
+        Q, U, sz, m, opc, n, d = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 11, 4),
+                                  bits(w, 5, 5), bits(w, 0, 5))
+        if opc == 0b0010 and sz == 2:
+            return f'sl_dot(c, {U}, {Q}, {d}, {n}, {m});'
+        raise Unsupported(f'simd 3ext {w:08x}')
+
+    def misc2_fp16(self, w):
+        """Advanced SIMD two-register miscellaneous (FP16): only FNEG and FABS, which touch the sign bit alone."""
+        Q, U, a, opc, n, d = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 23, 1), bits(w, 12, 5), bits(w, 5, 5),
+                              bits(w, 0, 5))
+        if a == 1 and opc == 0b01111:
+            return f'sl_fsign16(c, {U}, {Q}, {d}, {n});'  # U=1 FNEG, U=0 FABS
+        raise Unsupported(f'simd fp16 misc {w:08x}')
 
     def misc2(self, w, scalar=False):
         Q, U, sz, opc, n, d = bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5)

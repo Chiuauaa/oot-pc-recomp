@@ -593,6 +593,28 @@ SI void sl_across(Cpu *c, int op, int u, int Q, int sz, int d, int n) {
     }
     c->v[d] = (uint64_t)acc & lmask(op == 1 ? sz + 1 : sz);
 }
+// SDOT/UDOT (vector): each 32-bit lane of d accumulates the dot product of four bytes of n and m
+SI void sl_dot(Cpu *c, int u, int Q, int d, int n, int m) {
+    u128 a = c->v[n], b = c->v[m], o = c->v[d], r = 0;
+    for (int i = 0; i < (2 << Q); i++) {
+        uint32_t s = (uint32_t)lget(&o, 2, i);
+        for (int j = 0; j < 4; j++) {
+            uint64_t x = lget(&a, 0, 4 * i + j), y = lget(&b, 0, 4 * i + j);
+            s += u ? (uint32_t)(x * y) : (uint32_t)(int32_t)(lsx(x, 0) * lsx(y, 0));
+        }
+        lset(&r, 2, i, s);
+    }
+    c->v[d] = r;
+}
+// FNEG (neg = 1) / FABS (neg = 0), half precision vector: flip or clear bit 15 of each 16-bit lane
+SI void sl_fsign16(Cpu *c, int neg, int Q, int d, int n) {
+    u128 a = c->v[n], r = 0;
+    for (int i = 0; i < (4 << Q); i++) {
+        uint64_t x = lget(&a, 1, i);
+        lset(&r, 1, i, neg ? x ^ 0x8000u : x & 0x7fffu);
+    }
+    c->v[d] = r;
+}
 // PMULL2/PMULL 1Q (64x64 -> 128 carry-less)
 SI void sl_pmull64(Cpu *c, int part, int d, int n, int m) {
     uint64_t hi, lo = pmul64(((sa64 *)&c->v[n])[part], ((sa64 *)&c->v[m])[part], &hi);

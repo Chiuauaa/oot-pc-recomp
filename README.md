@@ -15,6 +15,10 @@ the Kingdom* on the original Switch.
 
 As far as we know, no other static recompilation of a Switch 2 game is public.
 
+> This is a community fork of [Lucas-blip-png/dkb-pc-recomp](https://github.com/Lucas-blip-png/dkb-pc-recomp),
+> created by Lucas-blip-png. The upstream history, original contributor credits and license notices are preserved.
+> This fork adds Linux build support and Linux-specific fixes.
+
 > [!IMPORTANT]
 > **No game files are included, and none ever will be.** You need your own copy of *Donkey Kong Bananza*, dumped
 > from your own console. Instructions for obtaining those files will not be provided. There are no downloadable
@@ -38,7 +42,7 @@ Progress, day by day: [docs/devlog.md](docs/devlog.md).
 | F2 NVN 2 | ✅ | 700 NVN 2 entry points answered; the game loop runs. 51 new command buffer calls (mesh shaders, VRS, DLSS, push constants…) are accepted but not recorded yet. |
 | F3 Shaders | ✅ | All 4,820 Ampere shader stages of the first 3D scene go through Eglantine's Ampere-to-Maxwell lowering and TotK Recomp's translator to SPIR-V. |
 | F4 Vulkan | ✅ | The title screen and the tutorial's 3D scene render. |
-| F5 Playable | 🚧 | Controller, guide movies (VP9) and push constants work. Open: a GPU fault some minutes in on NVIDIA, the black destructible terrain (its geometry stage, [#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45)), some textures, performance outside the tutorial. |
+| F5 Playable | 🚧 | Controller, guide movies (VP9) and push constants work. The native geometry path renders the destructible ground on one Linux GTX 1070; destruction and other GPUs still need validation. Open: a GPU fault some minutes in on NVIDIA, some textures, and performance outside the tutorial. See [#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45). |
 
 The plan, phase by phase: [docs/bananza-plan.md](docs/bananza-plan.md). What is open right now:
 [Roadmap to playable](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
@@ -129,7 +133,7 @@ builds it from their own dump; the installer does this for you ([docs/installer.
 
 **Which version of the game?** Base 1.0.0. Update 458752 has a different layout and is not supported yet.
 
-**Linux?** TotK Recomp's toolchain supports Linux, so it is possible; nobody has tried with Bananza yet.
+**Linux?** The runtime, lifter and build scripts are portable and the runtime, shader translator and game build on x86-64 Linux; [linux/README.md](linux/README.md) has the Bananza-specific steps. A Linux run on an NVIDIA GTX 1070 reached the tutorial, and the native geometry path fixes the black destructible terrain. Other GPUs and longer play sessions still need testing.
 
 **Why GPL?** The shader lowering comes from Eglantine (Eden Emulator Project), which is GPL. Files that came from TotK
 Recomp keep their MIT terms.

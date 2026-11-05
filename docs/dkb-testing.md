@@ -41,6 +41,8 @@ Useful settings, as environment variables (`set NAME=value` in the same Command 
 | Setting | Effect |
 | --- | --- |
 | `TOTK_PROFILE_DIR=<folder>` | Use this folder for the save and settings. A new, empty folder gives a fresh start, which is what reports should use. |
+| `TOTK_LANG=pt-BR` | Set the game's text and voice language to Brazilian Portuguese; the same choice is available in Settings → Game → Game language and takes effect after restart. |
+| `TOTK_OUTPUT_RES=1360x768` | Set the game's render resolution; the same choice is available in Settings → Screen → Game resolution and takes effect after restart. |
 | `TOTK_GPU_NAME=<text>` | Use the first GPU whose name contains this text, on machines with more than one. |
 | `TOTK_GPU=null` | Run without a picture (no Vulkan). Useful to tell CPU and OS bugs from graphics bugs. |
 | `TOTK_XLATE_PROCS=<n>` | Shader translator processes at run time (default 2). Lower it if RAM runs out. |
@@ -48,7 +50,7 @@ Useful settings, as environment variables (`set NAME=value` in the same Command 
 | `TOTK_PERF_SLOW_GPU_MS=<ms>` | With `TOTK_TRACE=perf`, a replay part that runs this long on the GPU (default 100) gets a line with its draw and dispatch counts and the NVN 2 names of its stages, a second line with the arguments of its indirect draws as read back afterwards, and a third saying whether a shader in that part wrote the largest one's arguments, and which. |
 | `TOTK_FIX_INDIRECT_RESET=0` | Draws the terrain's indirect-record reset program as a shader instead of the host doing its stores (#48). The shader's stores are lost, so the records keep zero or stale contents; for comparisons only. |
 | `TOTK_EXPERIMENTAL_GEOMETRY=1` | Replays draws with an ordinary geometry stage through it (#52). Off by default; other geometry draws are rejected once in the log. |
-| `TOTK_NATIVE_GS=1` (or `DKB_NATIVE_GS=1`) | Replays the game's native passthrough geometry stages on the portable path, which draws the destructible terrain (#45). Off by default. The varyings are inferred, not read from the hardware skip mask. |
+| `TOTK_NATIVE_GS=0` (or `DKB_NATIVE_GS=0`) | Disables the game's native passthrough geometry stage. It is enabled by default for Bananza because the terrain depends on it (#45). The varyings are inferred, not read from the hardware skip mask. |
 | `DKB_GEOMETRY_CONTEXT=1` | Logs the first 12 draws with a geometry stage and their buffers (#58). `DKB_GEOMETRY_CONTEXT_ORIGIN=<hex>` keeps only draws with that stage origin. |
 | `TOTK_TRACE=codec` | Log each call of the video decoder that moves a buffer or a picture. For guide movies that stop or show a flat colour. |
 

@@ -191,9 +191,11 @@ def main():
           f'seed written in {time.monotonic() - t0:.1f} s', flush=True)
     if a.no_run:
         return 0
-    exe = out / ('totk.exe' if os.name == 'nt' else 'totk')
+    exe = out / ('dkb.exe' if os.name == 'nt' else 'dkb')   # DKB Recomp; TotK builds keep totk(.exe)
+    if not exe.is_file():
+        exe = out / ('totk.exe' if os.name == 'nt' else 'totk')
     r = subprocess.run([str(exe), '--prepare-shaders'], cwd=str(out))
-    print(f'totk.exe --prepare-shaders: rc={r.returncode}; total {time.monotonic() - t0:.1f} s')
+    print(f'{exe.name} --prepare-shaders: rc={r.returncode}; total {time.monotonic() - t0:.1f} s')
     return r.returncode
 
 

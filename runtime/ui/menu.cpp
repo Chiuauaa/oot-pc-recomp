@@ -477,7 +477,7 @@ static void row_window_size(void) {
 // another shape, resolution.c res_init; the installer lays the HUD out for each, installer/steps.py ASPECT_SIZES), and
 // the current value when it is another size.
 static void row_output_res(void) {
-    static const char *const vals[] = {"1280x720", "1600x900", "1920x1080", "2560x1440", "3200x1800", "3840x2160",
+    static const char *const vals[] = {"1280x720", "1360x768", "1600x900", "1920x1080", "2560x1440", "3200x1800", "3840x2160",
                                        "2560x1080", "3440x1440", "3840x1600", "5120x2160", "3840x1080", "5120x1440",
                                        "1280x800", "1680x1050", "1920x1200", "2560x1600"};
     enum { N = sizeof vals / sizeof *vals };
@@ -518,14 +518,14 @@ static void row_gpu(void) {
     opt_choice_list("TOTK_GPU_INDEX", UI_MENU_GPU, vals, names, g_gpu_n + 1, UI_MENU_GPU_DESC);
 }
 
-// The game language: one entry per language TotK ships (a Switch code that names it), each under its own name. The
-// Switch's Portuguese is not among them.
+// The game's language: a Switch language code with each language's native name.
 static void row_game_lang(void) {
     static const struct { const char *code; UiTextId name; } langs[] = {
         {"en-US", UI_MENU_LANGNAME_EN}, {"ja", UI_MENU_LANGNAME_JA}, {"fr", UI_MENU_LANGNAME_FR},
         {"de", UI_MENU_LANGNAME_DE}, {"it", UI_MENU_LANGNAME_IT}, {"es", UI_MENU_LANGNAME_ES},
         {"nl", UI_MENU_LANGNAME_NL}, {"ru", UI_MENU_LANGNAME_RU},
-        {"zh-Hans", UI_MENU_LANGNAME_ZH_HANS}, {"zh-Hant", UI_MENU_LANGNAME_ZH_HANT}, {"ko", UI_MENU_LANGNAME_KO},
+        {"zh-Hans", UI_MENU_LANGNAME_ZH_HANS}, {"zh-Hant", UI_MENU_LANGNAME_ZH_HANT},
+        {"pt-BR", UI_MENU_LANGNAME_PT_BR}, {"ko", UI_MENU_LANGNAME_KO},
     };
     enum { N = sizeof langs / sizeof *langs + 1 };
     const char *vals[N], *names[N];

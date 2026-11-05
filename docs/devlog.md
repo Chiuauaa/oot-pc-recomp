@@ -5,6 +5,9 @@ the [roadmap issue](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/10).
 
 ## 4 November 2026
 
+- **The destructible ground renders on Linux.** On one Bananza 1.0.0 tutorial run with an NVIDIA GTX 1070, enabling
+  the native NVN 2 passthrough geometry path fixed the black ground. The runtime and Linux launcher now enable this
+  path by default. Terrain destruction, longer sessions and other GPUs still need testing ([#45](https://github.com/Lucas-blip-png/dkb-pc-recomp/issues/45)).
 - **No more clip and cull validation errors** (5ffe6ad). The translator declares `CullDistance[1]` next to
   `ClipDistance[8]`, which together exceed the device's limit of 8, and the runtime drops the member when nothing
   uses it. The check read the instruction number of `OpExtInst` as an id, and `Fma` (50) matched the `gl_PerVertex`
