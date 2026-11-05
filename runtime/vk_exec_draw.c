@@ -953,6 +953,19 @@ static int bind_range(VkExec *ex, uint64_t addr, uint64_t size, uint64_t align, 
     uint64_t n = size && size < sp.avail ? size : sp.avail;
     if (n > max) n = max;
     if (!n) return 0;
+    // OOT_BIG_POOL_LOG=1: the first 60 binds that land in a pool with 256 MiB or more past the address, with the size the
+    // game declared (0: none) and the range bound.
+    static int big_log = -1;
+    if (big_log < 0) big_log = cfg_get("OOT_BIG_POOL_LOG") != NULL;
+    if (big_log && sp.avail >= (256ull << 20)) {
+        static int lines;
+        if (lines < 60) {
+            lines++;
+            rt_log("vk: bind in a large pool: addr %#llx size %#llx -> %#llx bound (avail %#llx, use %d, written %d, max %#llx)",
+                   (unsigned long long)addr, (unsigned long long)size, (unsigned long long)n,
+                   (unsigned long long)sp.avail, use, written, (unsigned long long)max);
+        }
+    }
     if (sp.offset % align == 0) {
         VK_MEM_USE(sp);
         *out = (VkDescriptorBufferInfo){sp.buffer, sp.offset, n};
@@ -1230,6 +1243,20 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
     else if (slot >= 0 && slot < 16) b = ubo ? &ex->ubo[st][slot] : &ex->ssbo[st][slot];
     else if (ubo_ptr_res(r)) up.addr = ubo_ptr(ex, st, r), b = &up;   // size 0: up to the end of the backing
     if (b) {
+        // A storage buffer with no declared size (a guarded NVN 2 candidate read from a root or constant word, or a
+        // pointer out of a uniform buffer) would otherwise be bound up to the end of its pool. In Ocarina of Time a
+        // compute pass binds 0x200000000 that way inside a 2.4 GB CPU-cached pool: 1.4 GB bound as written, so every
+        // submission copied 1.4 GB from the VRAM mirror back to guest memory (~120 ms of PCIe each, 2 fps in the
+        // world). yuzu and Eden cap such bindings the same way (video_core/buffer_cache/buffer_cache.h,
+        // BufferCache::StorageBufferBinding: the mapped size, at most 8 MiB, when the cbuf holds no size); a guarded
+        // access past the cap branches away instead of reading. OOT_SBO_UNSIZED_MB sets the cap (default 8); 0 restores
+        // the old whole-remainder bind.
+        static uint64_t unsized_max = ~0ull;
+        if (unsized_max == ~0ull) {
+            const char *e = cfg_get("OOT_SBO_UNSIZED_MB");
+            unsized_max = e && *e ? (uint64_t)atoll(e) << 20 : 8ull << 20;
+        }
+        if (!ubo && !b->size && unsized_max && max > unsized_max) max = unsized_max;
         // vk_caps.c: shaders translated for sbuf_align address the buffer from its address rounded down to it.
         uint64_t lead = vk_caps.sbuf_align ? b->addr & (vk_caps.sbuf_align - 1) : 0;
         if (bind_range(ex, b->addr - lead, b->size ? b->size + lead : 0, align, max, ubo ? VK_MUSE_UBO : VK_MUSE_SSBO,

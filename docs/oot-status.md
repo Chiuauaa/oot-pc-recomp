@@ -2,6 +2,26 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 5 November 2026 (morning)
+
+- **2 fps in the world was a 1.4 GB write-back every submission.** Once gameplay starts the game creates a 2.4 GB
+  CPU-cached pool (`0x1bf470000+0x98000000`, flags 0x24) and a compute pass binds a guarded NVN 2 storage buffer at
+  `0x200000000` with no declared size. `bind_range` bound it to the end of the pool, 1.4 GB, marked written, so each
+  submission copied 1.4 GB from the VRAM mirror back to guest memory: a ~120 ms GPU part per frame of ~650 ms, PCIe at
+  ~13 GB/s, the SMs mostly idle (`nvidia-smi dmon`), which is why CPU and GPU use looked low. Storage buffers with no
+  size are now capped at 8 MiB, as yuzu/Eden do (`OOT_SBO_UNSIZED_MB`, 0 = old behaviour); the bind is now 8 MiB.
+- **Still open: the same pool doubles RAM and VRAM.** Its first buffer use makes a whole-pool shadow (2.4 GB of host
+  memory, `shadow_make`) and a whole-pool VRAM mirror (2.4 GB, `mirror_create`), though the GPU uses one 8 MiB window
+  of it. On the GTX 1070 / 16 GB PC the process went from 5.3 to 10.6 GB and VRAM to 8.1 of 8.2 GB within ~20 s of
+  entering the world (fix2), and the watchdog stopped it on the loading screen, so the world frame rate with the cap
+  is not measured yet. Next: shadow and mirror only the windows of very large pools that are bound.
+- The `NVN 2 program (Ampere code): no translator yet` lines start after the memory jump, not before. They come from
+  `req_init` in gfx_shader.c refusing an NVN 2 program on the Maxwell path before the failure cache key exists, so
+  the same draws retry (and are skipped) twice a frame. Cheap; those objects are missing on screen.
+- Diagnostics: `OOT_ALLOC_LOG=<MiB>` logs each device-memory allocation of that size or more with its memory type,
+  the live total per type and the host return addresses (vk_headroom.c); `OOT_BIG_POOL_LOG=1` logs the first 60 binds
+  inside pools with 256 MiB or more past the address (vk_exec_draw.c `bind_range`).
+
 ## 5 November 2026 (night)
 
 - **Running out of memory with the GPU on** (c4b436d). With the GPU the process grew past 7.4 GB in 25 s at the title
@@ -46,7 +66,8 @@ Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
 ## Open work, by priority
 
-1. Confirm on screen that gameplay shows (screenshots after loading).
+1. Windowed shadow and mirror for very large pools (the 2.4 GB pool above), then confirm on screen that gameplay
+   shows and measure its frame rate.
 2. The composite fills only the top-left 1706x960 of 2560x1440: the dropped neural upscaler did that scaling. The
    stand-in blit (vk_exec_draw.c `upscale_standin`) only finds compute-written sources; in gameplay the source is a
    render-pass output. `OOT_TENSOR_LOG=1` lists what each dropped stage binds.

@@ -20,6 +20,12 @@
 #include "vk.h"
 #include "platform/platform.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+#if defined(__linux__)
+#include <execinfo.h>
+#endif
+
 #define HR_PERIOD_MS 500
 #define HR_SMALL_HEAP (1ull << 30)   // VMA_SMALL_HEAP_MAX_SIZE: smaller heaps use blocks of a heap eighth
 
@@ -35,8 +41,41 @@ static struct {
     VmaAllocation anchor[64]; // per memory type: the half block that keeps the newest spare block from being deleted
 } H;
 
+// OOT_ALLOC_LOG=<MiB>: every VkDeviceMemory of at least that size (VMA blocks and dedicated allocations) gets a line
+// with its memory type, the running total of live device memory per type, and the host return addresses of the
+// allocating thread (exe+offset; add the image base, 0x200000 for the Linux build, before looking it up in totk.map), to
+// find what makes VRAM jump by gigabytes in a few frames. The callbacks are installed when this or the headroom is on.
+static int64_t alloc_log_min = -1;
+static volatile int64_t live[64];   // bytes of device memory alive per memory type, counted by these callbacks
+
+static void alloc_log(uint32_t type, VkDeviceSize size, int freed) {
+    if (alloc_log_min < 0) {
+        const char *e = cfg_get("OOT_ALLOC_LOG");
+        alloc_log_min = e && atoll(e) > 0 ? atoll(e) << 20 : 0;
+    }
+    if (type < 64) plat_add64(&live[type], freed ? -(int64_t)size : (int64_t)size);
+    if (!alloc_log_min || (int64_t)size < alloc_log_min) return;
+    char where[512] = "";
+#if defined(__linux__)
+    void *pc[12];
+    int n = backtrace(pc, 12);
+    char *p = where;
+    for (int i = 1; i < n && p < where + sizeof where - 24; i++)
+        p += snprintf(p, (size_t)(where + sizeof where - p), " exe+%#llx",
+                      (unsigned long long)((uintptr_t)pc[i] - (uintptr_t)plat_exe_base()));
+#endif
+    rt_log("vk alloc: %s %.1f MiB of memory type %u on thread %u; live in that type %.1f MiB;%s", freed ? "freed" : "new",
+           size / 1048576.0, type, plat_thread_id(), type < 64 ? live[type] / 1048576.0 : 0.0, where);
+}
+
+static void VKAPI_PTR on_free(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *user) {
+    (void)a, (void)m, (void)user;
+    alloc_log(type, size, 1);
+}
+
 static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory m, VkDeviceSize size, void *user) {
     (void)a, (void)m, (void)size, (void)user;
+    alloc_log(type, size, 0);
     if (!H.on || type >= 64) return;
     if (plat_thread_id() == H.tid) {
         plat_inc64(&H.made);
@@ -48,9 +87,10 @@ static void VKAPI_PTR on_allocate(VmaAllocator a, uint32_t type, VkDeviceMemory 
 }
 
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
-    static const VmaDeviceMemoryCallbacks cb = {.pfnAllocate = on_allocate};
+    static const VmaDeviceMemoryCallbacks cb = {.pfnAllocate = on_allocate, .pfnFree = on_free};
     H.on = !cfg_get("TOTK_VRAM_HEADROOM") || cfg_bool("TOTK_VRAM_HEADROOM");
-    return H.on ? &cb : NULL;
+    const char *log = cfg_get("OOT_ALLOC_LOG");
+    return H.on || (log && atoll(log) > 0) ? &cb : NULL;
 }
 
 static VkDeviceSize block_size(const VkCtx *c, uint32_t type) {
