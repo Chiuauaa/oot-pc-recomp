@@ -4,6 +4,20 @@ Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
 ## 5 November 2026 (night)
 
+- **Running out of memory with the GPU on** (c4b436d). With the GPU the process grew past 7.4 GB in 25 s at the title
+  screen (4.1 GB headless) and a 16 GB PC ran out. 4 GB of it were `/dev/nvidiactl` mappings: in shadow mode (the Linux
+  default) every CPU-visible pool got a host-visible copy of its whole size when created, and the game creates ~2150
+  pools, 2.9 GB of them CPU-cached texture pools (flags 0x24) the GPU only reads through images. Shadows are now made
+  at a pool's first buffer use: 19 MB of them at the title, the process stays near 5.2 GB. `TOTK_SHADOW=0` (imports)
+  was no help on NVIDIA: importing pins and fills the guest pages, 7 GB in 9 s.
+- **Gameplay still needs ~9 GB.** Headless, the process reaches 6.9 GB once Kokiri Forest loads (boot134), ~5.3 GB of
+  it guest memory the game fills while loading (a 2.6 GB jump in about 2 s). With the GPU that is ~1.5-2 GB more; the
+  PC had ~10.5 GB available with Discord and Brave open (~3 GB together), and the run (boot133) was stopped by the
+  watchdog at 1.5 GB available, during the load. Next: close those, or look at the GPU-side host memory (anonymous
+  driver maps ~1.2 GB, 256 MiB host-visible VMA blocks).
+- `tools/oot_run_watchdog.sh <name> <seconds> [ENV=...]` runs the game with screenshots, memory samples and a
+  MemAvailable floor (`WD_KB`, default 2.5 GB).
+
 - **Slow gameplay loading was the hard disk** (299f32e). The game opens thousands of files per area (Kokiri Forest
   ~8000, 2.5 GB), each at its own place in the 25 GB `romfs.bin`. On the spinning disk that holds the image it was
   seek-bound: 99% busy at 10-25 MB/s, ~45 files/s, minutes of black loading screen. Measured with `OOT_FS_STATS=1` and
