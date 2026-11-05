@@ -129,6 +129,8 @@ static void log_open(int game) {
 }
 
 static void parse_trace(void) {
+    const char *ft = cfg_get("TOTK_FNTRACE");   // function flight recorder, see fnprof_hit
+    g_fnprof = ft && *ft && *ft != '0';
     const char *e = cfg_get("TOTK_TRACE");   // no default: nothing is traced when unset
     if (!e) return;
     static const struct { const char *name; unsigned bit; } names[] = {
@@ -152,8 +154,18 @@ static RtConfig cfg;
 const RtConfig *rt_config(void) { return &cfg; }
 
 // ---- runtime services the generated code calls (cpu.h)
+// Function flight recorder (TOTK_FNTRACE=1): every lifted function calls FN_ENTER on entry, which lands here and keeps the
+// last FN_RING entries of the calling host thread (address, caller's lr, x0). A crash dump prints the tail of the
+// crashing thread's ring, so a game without symbols shows the path that led to the fault. Off, FN_ENTER costs one branch.
+#define FN_RING 262144
+typedef struct { uint64_t addr, lr, x0; } FnRec;
+static __thread FnRec t_fnring[FN_RING];
+static __thread uint32_t t_fnn;
 volatile int g_fnprof = 0;
-void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) { (void)addr, (void)lr, (void)x0; }
+void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) {
+    FnRec *r = &t_fnring[t_fnn++ & (FN_RING - 1)];
+    r->addr = addr, r->lr = lr, r->x0 = x0;
+}
 
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
     char at[128], lr[128];
@@ -258,6 +270,29 @@ static void crash_handler(const PlatCrash *x) {
         rt_logf("  host frame %2d: totk+%#llx", i, (unsigned long long)(x->frames[i] - (rip - x->offset)));
         if (g) rt_logf(" in lifted function f_%llx", (unsigned long long)g);
         rt_log_raw("\n", 1);
+    }
+    if (g_fnprof) {   // the whole ring to fntrace.txt (TOTK_FNTRACE_FILE names another file), for searching by object
+        const char *path = cfg_get("TOTK_FNTRACE_FILE");
+        FILE *ff = fopen(path && *path ? path : "fntrace.txt", "w");
+        if (ff) {
+            uint32_t n = t_fnn, cnt = n < FN_RING ? n : FN_RING;
+            for (uint32_t k = n - cnt; k != n; k++) {
+                const FnRec *r = &t_fnring[k & (FN_RING - 1)];
+                fprintf(ff, "%llx %llx %llx\n", (unsigned long long)r->addr, (unsigned long long)r->lr,
+                        (unsigned long long)r->x0);
+            }
+            fclose(ff);
+        }
+    }
+    if (g_fnprof) {   // the path of the crashing thread: oldest first, with the caller each call came from
+        uint32_t n = t_fnn, cnt = n < FN_RING ? n : FN_RING, show = cnt < 300 ? cnt : 300;
+        rt_logf("  function trace, last %u of %u entries (oldest first):\n", show, n);
+        for (uint32_t k = n - show; k != n; k++) {
+            const FnRec *r = &t_fnring[k & (FN_RING - 1)];
+            char a[96], l[96];
+            rt_logf("    %s  <- %s  x0=%#llx\n", ldr_describe(r->addr, a, sizeof a), ldr_describe(r->lr, l, sizeof l),
+                    (unsigned long long)r->x0);
+        }
     }
     Cpu *c = kern_cpu();
     if (c) {
