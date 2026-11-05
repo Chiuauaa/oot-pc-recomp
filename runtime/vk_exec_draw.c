@@ -29,6 +29,8 @@
 #include "nvn_indirect_reset.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_view_format.h"
+#include "tex.h"
 #include "platform/platform.h"
 
 #define MAX_BINDINGS 128
@@ -454,6 +456,7 @@ static void dummies_init(void) {
 }
 
 static void twins_release(VkCtx *c);
+static void upscale_release(void);
 
 // Releases the stand-ins and the depth twins. The device must be idle; the game path leaves them to process exit like
 // the pipelines.
@@ -461,6 +464,7 @@ void vk_exec_draw_shutdown(void) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     twins_release(c);
+    upscale_release();
     for (int i = 0; Z.ready && i < DV_COUNT; i++) {
         if (Z.img[i].sview != Z.img[i].view) vkDestroyImageView(c->device, Z.img[i].sview, NULL);
         vkDestroyImageView(c->device, Z.img[i].view, NULL);
@@ -558,6 +562,16 @@ static nvn_hmap views_by_image;          // VkImage -> its first ViewNode
 // the image cannot serve it (the caller binds a stand-in). Texture lock held.
 static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, int hv, uint16_t rtype, int storage) {
     (void)ex;
+    VkFormat format = img->format;
+    const uint8_t *channels = img->chan;
+    int alpha_one = img->alpha_one;
+    TexVkFormat mapped;
+    // NVNtextureView's format is a bit reinterpretation. Ocarina writes packed RGB data
+    // through R32_UINT views; binding the base floating-point format corrupts those bits.
+    if (hv && v->set_format && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
+        if (!tex_vk_format(v->format, &mapped) || !vk_color_view_compatible(img->format, mapped.vk)) return VK_NULL_HANDLE;
+        format = mapped.vk, channels = mapped.chan, alpha_one = mapped.alpha_one;
+    }
     VkImageViewType vt = res_view_type(rtype);
     int ms = (rtype & 0x200) != 0;
     if ((img->samples > 1) != ms || (storage && ms)) return VK_NULL_HANDLE;
@@ -597,25 +611,31 @@ static VkImageView get_view(VkExec *ex, const VkTexImage *img, const view_t *v, 
     uint8_t sw[4] = {NVN_TEXTURE_SWIZZLE_R, NVN_TEXTURE_SWIZZLE_G, NVN_TEXTURE_SWIZZLE_B, NVN_TEXTURE_SWIZZLE_A};
     if (!storage) {   // MNG nvn_mtl.m tex_swizzle_sel: view selectors replace the texture's, then the format remap
         memcpy(sw, hv && v->set_swizzle ? v->swz : img->swz, 4);
-        if (img->alpha_one || img->chan[0])
+        if (alpha_one || channels[0])
             for (int i = 0; i < 4; i++) {
-                if (img->alpha_one && sw[i] == NVN_TEXTURE_SWIZZLE_A) sw[i] = NVN_TEXTURE_SWIZZLE_ONE;
-                else if (img->chan[0] && sw[i] >= NVN_TEXTURE_SWIZZLE_R && sw[i] <= NVN_TEXTURE_SWIZZLE_A)
-                    sw[i] = img->chan[sw[i] - NVN_TEXTURE_SWIZZLE_R];
+                if (alpha_one && sw[i] == NVN_TEXTURE_SWIZZLE_A) sw[i] = NVN_TEXTURE_SWIZZLE_ONE;
+                else if (channels[0] && sw[i] >= NVN_TEXTURE_SWIZZLE_R && sw[i] <= NVN_TEXTURE_SWIZZLE_A)
+                    sw[i] = channels[sw[i] - NVN_TEXTURE_SWIZZLE_R];
             }
     }
     uint32_t swz = (uint32_t)sw[0] | (uint32_t)sw[1] << 8 | (uint32_t)sw[2] << 16 | (uint32_t)sw[3] << 24;
-    ViewKey k = {img->image, img->format, vt, aspect, l0, nl, y0, ny, swz};
+    // NVN selectors use only three bits per byte; bit 31 separates storage-only views
+    // from sampled views with the same format and identity swizzle.
+    ViewKey k = {img->image, format, vt, aspect, l0, nl, y0, ny, swz | (storage ? 0x80000000u : 0)};
     if (!view_of.klen) nvn_hm_init(&view_of, sizeof(ViewKey)), nvn_hm_init(&views_by_image, sizeof(VkImage));
     VkImageView found = (VkImageView)nvn_hm_get(&view_of, &k);
     if (found) return found;
+    VkFormatProperties properties;
+    vkGetPhysicalDeviceFormatProperties(vk_ctx()->phys, format, &properties);
+    VkFormatFeatureFlags required = storage ? VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    if (!(properties.optimalTilingFeatures & required)) return VK_NULL_HANDLE;
     VkImageViewCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img->image, .viewType = vt,
-                                .format = img->format,
+                                .format = format,
                                 .components = {swz_of(sw[0]), swz_of(sw[1]), swz_of(sw[2]), swz_of(sw[3])},
                                 .subresourceRange = {aspect, l0, nl, y0, ny}};
     VkImageViewUsageCreateInfo use = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
-                                      .usage = VK_IMAGE_USAGE_SAMPLED_BIT};
-    if (img->block_views) ci.pNext = &use;   // the image's COLOR_ATTACHMENT usage is its block views' (vk_texture.c)
+                                      .usage = storage ? VK_IMAGE_USAGE_STORAGE_BIT : VK_IMAGE_USAGE_SAMPLED_BIT};
+    ci.pNext = &use;   // extended image usages need not be supported by every view format
     VkImageView view;
     if (vkCreateImageView(vk_ctx()->device, &ci, NULL, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
     ViewNode *n = malloc(sizeof *n);
@@ -679,14 +699,42 @@ void vk_exec_image_gone(VkImage image) {
 typedef struct { uint64_t serial; int stage; int used; GfxShaderAnswers a; const GfxShader *s; } ShaderEnt;
 static ShaderEnt shader_tab[SHADER_SETS][SHADER_WAYS];
 
+// Failed lowering leaves the compact native control in the program. Its stage and
+// length cannot be read at the legacy offsets: that can hide a failed fragment
+// stage as absent and submit a depth-only draw instead of reporting the failure.
+static int program_stage_info(const NVNshaderData *data, uint32_t *stage, uint32_t *length) {
+    const uint8_t *ctl = data->control, *code = (const uint8_t *)(uintptr_t)data->data;
+    if (!ctl || !code) return 0;
+    if (gfx_shader_is_nvn2(ctl)) {
+        uint32_t w0;
+        memcpy(length, ctl + 0x38, 4);
+        if (*length < 4) return 0;
+        memcpy(&w0, code, 4);
+        int graphics = ((w0 & 31) == 1 || (w0 & 31) == 2) && ((w0 >> 5) & 31) == 4;
+        if (!graphics) { *stage = NVN_STAGE_CS; return 1; }
+        switch ((w0 >> 10) & 15) {
+        case 1: *stage = NVN_STAGE_VS; break;
+        case 2: *stage = 3; break;   // tessellation control, as nvn2_lower
+        case 3: *stage = 4; break;   // tessellation evaluation; mesh mode still needs explicit context
+        case 4: *stage = NVN_STAGE_GS; break;
+        case 5: *stage = NVN_STAGE_FS; break;
+        default: return 0;
+        }
+    } else {
+        memcpy(stage, ctl + 0x714, 4);
+        memcpy(length, ctl + 0x704, 4);
+    }
+    return *stage < 6;
+}
+
 static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
     for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
         const uint8_t *c = p->sd[i].control;
         if (!c || !p->sd[i].data) continue;
-        uint32_t st;
-        memcpy(&st, c + 0x714, 4);
+        uint32_t st, length;
+        if (!program_stage_info(&p->sd[i], &st, &length)) continue;
         if ((int)st != nvn_stage) continue;
-        memcpy(len, c + 0x704, 4);
+        *len = length;
         *ctl = c, *code = (const uint8_t *)(uintptr_t)p->sd[i].data;
         return 1;
     }
@@ -708,9 +756,9 @@ static int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const
         for (uint32_t i = 0; i < p->nstage && i < 6; i++) {
             const uint8_t *c = p->sd[i].control;
             if (!c || !p->sd[i].data) continue;
-            uint32_t st;
-            memcpy(&st, c + 0x714, 4);
-            if (st < 6 && m->idx[st] < 0) m->idx[st] = (int8_t)i, memcpy(&m->len[st], c + 0x704, 4);
+            uint32_t st, length;
+            if (!program_stage_info(&p->sd[i], &st, &length)) continue;
+            if (m->idx[st] < 0) m->idx[st] = (int8_t)i, m->len[st] = length;
         }
     }
     int i = m->idx[nvn_stage];
@@ -722,7 +770,7 @@ static int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const
 // Texture and image types of a stage's first 32 slots, each kept with the handle and the generation and slot token it
 // was looked up under: a slot is looked up again, a hash probe, only when the handle changed or its slot may resolve
 // otherwise (slot_still).
-static struct { uint64_t context, tex[32], img[32], ttok[32], itok[32]; uint32_t tgen[32], igen[32]; uint8_t tt[32], it[32]; } AC[6];
+static struct { uint64_t context, tex[32], img[32], ttok[32], itok[32]; uint32_t tgen[32], igen[32]; uint8_t tt[32], it[32], ifmt[32]; } AC[6];
 static uint64_t descriptor_serial = 1;
 
 // vk_texture_slot_token of the slot a texture or image handle names; an empty handle always resolves to nothing.
@@ -773,6 +821,32 @@ static uint8_t type_of_handle(const VkExec *ex, uint64_t h) {   // texture lock 
     return img ? (uint8_t)gfx_type_of(img, &v, hv) : 0;
 }
 
+// Storage instructions need the effective view format as well as its dimensions.
+// Leaving this unknown makes the translator declare integer images as floating point.
+static uint8_t format_of_handle(const VkExec *ex, uint64_t h) {   // texture lock held
+    view_t v;
+    int hv;
+    const VkTexImage *img = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), &v, &hv) : NULL;
+    if (!img) return 0;
+    VkFormat format = img->format;
+    TexVkFormat mapped;
+    if (hv && v.set_format && img->aspect == VK_IMAGE_ASPECT_COLOR_BIT &&
+        tex_vk_format(v.format, &mapped) && vk_color_view_compatible(format, mapped.vk)) format = mapped.vk;
+    for (int i = 1; i < 40; i++) if (tex_format[i] == format) return (uint8_t)i;
+    return 0;
+}
+
+static uint8_t sampled_type_of_handle(const VkExec *ex, uint64_t h) {
+    uint8_t type = type_of_handle(ex, h);
+    switch (format_of_handle(ex, h)) {
+    case 3: case 8: case 11: case 15: case 20: case 23: case 27: case 32: case 35: case 38:
+        return type ? type | 0x40 : 0;
+    case 4: case 9: case 12: case 16: case 21: case 24: case 28: case 33: case 36:
+        return type ? type | 0x80 : 0;
+    default: return type;
+    }
+}
+
 // The answers of stage st for the slots in mask; the types of other slots stay zero.
 static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, GfxShaderAnswers *a) {
     descriptor_state(ex);
@@ -803,11 +877,13 @@ static void answers_for(VkExec *ex, int st, const uint8_t *ctl, uint32_t mask, G
         int imiss = c->img[slot] != hi || !c->itok[slot] || !slot_still(ex, &c->igen[slot], c->itok[slot], hi, gen);
         uint64_t tt = tmiss ? token_of(ex, h) : 0, it = imiss ? token_of(ex, hi) : 0;
         if ((tmiss || imiss || check) && !locked) vk_texture_lock(), locked = 1, BS.ac_miss++;
-        if (tmiss) c->tt[slot] = type_of_handle(ex, h), c->tex[slot] = h, c->ttok[slot] = tt, c->tgen[slot] = gen;
-        if (imiss) c->it[slot] = type_of_handle(ex, hi), c->img[slot] = hi, c->itok[slot] = it, c->igen[slot] = gen;
-        if (check && (type_of_handle(ex, h) != c->tt[slot] || type_of_handle(ex, hi) != c->it[slot]))   // TOTK_SHADER_MEMO=check
-            rt_fatal("vk_exec: kept texture types of stage %d slot %d differ from a lookup", st, slot);
-        a->tex_type[slot] = c->tt[slot], a->img_type[slot] = c->it[slot];
+        if (tmiss) c->tt[slot] = sampled_type_of_handle(ex, h), c->tex[slot] = h, c->ttok[slot] = tt, c->tgen[slot] = gen;
+        if (imiss) c->it[slot] = type_of_handle(ex, hi), c->ifmt[slot] = format_of_handle(ex, hi),
+                   c->img[slot] = hi, c->itok[slot] = it, c->igen[slot] = gen;
+        if (check && (sampled_type_of_handle(ex, h) != c->tt[slot] || type_of_handle(ex, hi) != c->it[slot] ||
+                      format_of_handle(ex, hi) != c->ifmt[slot]))   // TOTK_SHADER_MEMO=check
+            rt_fatal("vk_exec: kept texture answers of stage %d slot %d differ from a lookup", st, slot);
+        a->tex_type[slot] = c->tt[slot], a->img_type[slot] = c->it[slot], a->img_format[slot] = c->ifmt[slot];
     }
     if (locked) vk_texture_unlock();
 }
@@ -876,6 +952,13 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
     if (pending) *pending = 0;
     if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
     *present = 1;
+    if (gfx_shader_is_nvn2(ctl)) {
+        // Program creation already rejected this native stage. answers_for and
+        // the descriptor helpers require a full legacy-shaped control block.
+        warn_once(W_SHADER, "unlowered native stage %d of program %llu (%016llx): draws with it are skipped", st,
+                  (unsigned long long)ex->prog->serial, (unsigned long long)gfx_shader_nvn2_hash(ctl, code));
+        return NULL;
+    }
     if (st == NVN_STAGE_GS && native_gs_on() && nvn2_origin(code)) {
         if (!native_gs_vs || !native_gs_fs) {   // its varyings follow from the other stages, which are still pending
             if (pending) *pending = 1;
@@ -2504,7 +2587,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
         if (memo && vs && !vs_wait && !fs_wait && !gs_wait && (!has_fs || fs) && (!want_gs || (has_gs && gs)))
             memo_key(ex, gen, &SM.k), SM.vs = vs, SM.fs = fs, SM.gs = gs, SM.has_fs = has_fs, SM.has_gs = has_gs, SM.valid = 1;
     }
-    if (!has_vs) return warn_once(W_NO_VS, "a draw with a program that has no vertex stage is skipped"), 0;
+    if (!has_vs) {
+        if (vk_dump_armed) vk_dump_draw_skip(ex, "vertex stage unavailable");
+        return warn_once(W_NO_VS, "a draw with a program that has no vertex stage is skipped"), 0;
+    }
     static int bis_lo = -1, bis_hi = 255;   // DKB_DRAW_BISECT=lo-hi (hex): only draws whose program byte is in range
     if (bis_lo < 0) {
         const char *e = getenv("DKB_DRAW_BISECT");
@@ -2535,7 +2621,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     // session. A draw into per-frame targets is skipped until they are ready and comes back next frame.
     int oneshot = -1, skip = pipe_skip_mode();   // -1: not looked up
     if (vs_wait || fs_wait || gs_wait) {
-        if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1))) return perf_count(PERF_CNT_SHADER_SKIP), 0;   // skipped until ready
+        if (!(oneshot = !vk_exec_targets_recent(ex, skip >= 1))) {
+            if (vk_dump_armed) vk_dump_draw_skip(ex, "shader translation pending");
+            return perf_count(PERF_CNT_SHADER_SKIP), 0;
+        }
         perf_count(PERF_CNT_ONESHOT_WAIT);
         if (vs_wait) vs = shader_for(ex, NVN_STAGE_VS, &has_vs, NULL, 1);
         if (fs_wait) fs = shader_for(ex, NVN_STAGE_FS, &has_fs, NULL, 1);
@@ -2544,7 +2633,11 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     }
     if (stage_diag_skip(ex, vs)) return 0;
     if (light_quad_fault_skip(ex, vs, fs)) return 0;
-    if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) return 0;
+    if (!vs || (has_fs && !fs) || (want_gs && (!has_gs || !gs))) {
+        if (vk_dump_armed) vk_dump_draw_skip(ex, !vs ? "vertex shader failed" : has_fs && !fs ?
+                                           "fragment shader failed" : "geometry shader unavailable");
+        return 0;
+    }
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
@@ -2608,8 +2701,14 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
                (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, waited / 1e6, why,
                pending ? ", skipped after all" : "", count, ex->pass_w, ex->pass_h, tg);
     }
-    if (pending) return 0;   // a background worker is building it: the draw is skipped until it is ready
-    if (!p || !info) return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
+    if (pending) {
+        if (vk_dump_armed) vk_dump_draw_skip(ex, "pipeline compilation pending");
+        return 0;
+    }
+    if (!p || !info) {
+        if (vk_dump_armed) vk_dump_draw_skip(ex, "pipeline creation failed");
+        return warn_once(W_PIPELINE, "a graphics pipeline could not be created: draws with it are skipped"), 0;
+    }
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
         vk_pipeline_set_dynamic(ex->cb, &s);
@@ -2789,7 +2888,66 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 
 // ---- the upscaler's stand-in (Ocarina of Time)
 // The picture a compute shader wrote last (the video's NV12 -> RGBA conversion is one), kept as the source of the blit.
-static struct { VkImage image; uint32_t w, h; VkFormat format; VkImageUsageFlags usage; int fresh; } up_src;   // fresh: not blitted since written
+static struct { VkImage image; uint64_t addr; uint32_t w, h; VkFormat format; VkImageUsageFlags usage; int fresh, packed; } up_src;   // fresh: not blitted since written
+static struct { VkImage image; VmaAllocation alloc; uint32_t w, h; } up_packed;
+
+static void upscale_release(void) {
+    if (up_packed.image) vmaDestroyImage(vk_ctx()->vma, up_packed.image, up_packed.alloc);
+    memset(&up_packed, 0, sizeof up_packed);
+    memset(&up_src, 0, sizeof up_src);
+}
+
+static VkImage upscale_rgb9e5(VkExec *ex) {
+    VkCtx *c = vk_ctx();
+    if (!up_packed.image || up_packed.w != up_src.w || up_packed.h != up_src.h) {
+        if (up_packed.image) vk_defer_image(up_packed.image, up_packed.alloc);
+        memset(&up_packed, 0, sizeof up_packed);
+        VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+            .format = VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, .extent = {up_src.w, up_src.h, 1}, .mipLevels = 1,
+            .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        if (vmaCreateImage(c->vma, &ii, &ai, &up_packed.image, &up_packed.alloc, NULL) != VK_SUCCESS)
+            rt_fatal("tensor: RGB9E5 conversion image allocation failed");
+        up_packed.w = up_src.w, up_packed.h = up_src.h;
+    }
+    // This image has independent memory. Copying preserves the packed bits without
+    // touching another texture's aliased pool storage or performing a float conversion.
+    VkImageMemoryBarrier2 image = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = up_packed.image, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &image};
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    VkImageCopy copy = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+        .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .extent = {up_src.w, up_src.h, 1}};
+    vkCmdCopyImage(ex->cb, up_src.image, VK_IMAGE_LAYOUT_GENERAL, up_packed.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+    image.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT, image.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    image.dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT, image.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    image.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    ex->recorded++;
+    return up_packed.image;
+}
+
+// Bounded diagnostic metadata for the upscaler's image selection. No image bytes are logged.
+static void upscale_trace_image(VkExec *ex, const VkTexImage *t, int slot, unsigned flags) {
+    static int enabled = -1;
+    static struct { uint64_t shader; uint32_t w, h, format, slot, flags; } seen[256];
+    static unsigned count;
+    if (enabled < 0) enabled = getenv("OOT_UPSCALE_TRACE") != NULL;
+    if (!enabled || !t || t->width < 1280 || t->height < 720 || count == 256) return;
+    uint64_t shader = ex->prog && ex->prog->nstage ? nvn2_origin((const uint8_t *)(uintptr_t)ex->prog->sd[0].data) : 0;
+    for (unsigned i = 0; i < count; ++i)
+        if (seen[i].shader == shader && seen[i].w == t->width && seen[i].h == t->height &&
+            seen[i].format == (uint32_t)t->format && seen[i].slot == (uint32_t)slot && seen[i].flags == flags) return;
+    seen[count].shader = shader, seen[count].w = t->width, seen[count].h = t->height;
+    seen[count].format = t->format, seen[count].slot = slot, seen[count++].flags = flags;
+    rt_log("upscale-trace: compute %016llx image slot %d %ux%u format %d flags %#x address %#llx",
+           (unsigned long long)shader, slot, t->width, t->height, (int)t->format, flags, (unsigned long long)t->addr);
+}
 
 // The bound storage image of the compute stage with the largest area (and its size), or NULL.
 static const VkTexImage *largest_storage_image(VkExec *ex) {
@@ -2807,16 +2965,51 @@ static const VkTexImage *largest_storage_image(VkExec *ex) {
 // earlier dispatches, the stand-in's own destination among them).
 static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
     const VkTexImage *best = NULL;
+    int packed = 0;
     vk_texture_lock();
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
         if (b->kind != GFX_RES_IMG || !b->res || b->res->slot < 0 || b->res->slot >= 32) continue;
         uint64_t h = ex->img[NVN_STAGE_CS][b->res->slot];
-        const VkTexImage *t = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL) : NULL;
-        if (t && t->type == VK_IMAGE_TYPE_2D && (!best || (uint64_t)t->width * t->height > (uint64_t)best->width * best->height)) best = t;
+        view_t view;
+        int has_view = 0;
+        const VkTexImage *t = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), &view, &has_view) : NULL;
+        upscale_trace_image(ex, t, b->res->slot, b->res->flags);
+        if (t && t->type == VK_IMAGE_TYPE_2D && (!best || (uint64_t)t->width * t->height > (uint64_t)best->width * best->height)) {
+            best = t;
+            packed = has_view && view.set_format && view.format == NVN_FORMAT_R32UI &&
+                     (t->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || t->format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32);
+        }
     }
-    if (best && best->width >= 1280 && best->height >= 720)
-        up_src.image = best->image, up_src.w = best->width, up_src.h = best->height, up_src.format = best->format, up_src.usage = best->usage, up_src.fresh = 1;
+    // A linear replacement for the tensor network needs colour values, not its packed
+    // integer transport. Use the packing dispatch's unique declared HDR colour input.
+    // Diagnostic only: this bypass omits the packing pass's colour processing and
+    // produces excessive brightness in gameplay. Keep it off in ordinary runs.
+    static int unpacked = -1;
+    if (unpacked < 0) unpacked = getenv("OOT_LINEAR_UNPACKED_SOURCE") != NULL;
+    if (best && packed && unpacked) {
+        const VkTexImage *colour = NULL;
+        int ambiguous = 0;
+        for (uint32_t i = 0; i < info->n_bindings; i++) {
+            const VkPipeBinding *b = &info->bindings[i];
+            if (b->kind != GFX_RES_TEX || !b->res || b->res->slot < 0 || b->res->slot >= 32) continue;
+            uint64_t handle = ex->tex[NVN_STAGE_CS][b->res->slot];
+            const VkTexImage *input = handle ? vk_texture_by_id_locked(&ex->tex_pool, (int)(handle & 0xfffff), NULL, NULL) : NULL;
+            if (!input || input->image == best->image || input->width != best->width || input->height != best->height ||
+                input->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32) continue;
+            if (colour && colour->image != input->image) { ambiguous = 1; break; }
+            colour = input;
+        }
+        if (colour && !ambiguous) {
+            best = colour;
+            packed = 0;
+            static int told;
+            if (!told++) rt_log("tensor: linear stand-in uses the unpacked HDR colour input");
+        }
+    }
+    if (best && ((best->width >= 1280 && best->height >= 720) || packed))
+        up_src.image = best->image, up_src.addr = best->addr, up_src.w = best->width, up_src.h = best->height,
+        up_src.format = best->format, up_src.usage = best->usage, up_src.fresh = 1, up_src.packed = packed;
     vk_texture_unlock();
 }
 
@@ -2824,6 +3017,17 @@ static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
 static void upscale_standin(VkExec *ex) {
     if (!up_src.image || !up_src.fresh) return;   // once per new picture: every stage of the chain would do it again
     vk_texture_lock();
+    int rgb9e5 = 0;
+    if (up_src.packed && up_src.format == VK_FORMAT_B10G11R11_UFLOAT_PACK32)
+        for (int slot = 0; slot < 32; slot++) {
+            uint64_t handle = ex->tex[NVN_STAGE_CS][slot];
+            view_t view;
+            int has_view = 0;
+            const VkTexImage *input = handle ? vk_texture_by_id_locked(&ex->tex_pool, (int)(handle & 0xfffff), &view, &has_view) : NULL;
+            if (input && input->addr == up_src.addr && input->width == up_src.w && input->height == up_src.h &&
+                ((has_view && view.set_format && view.format == NVN_FORMAT_RGB9E5F) ||
+                 input->format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32)) { rgb9e5 = 1; break; }
+        }
     const VkTexImage *t = largest_storage_image(ex);
     VkImage dst = VK_NULL_HANDLE;
     uint32_t w = 0, h = 0;
@@ -2838,19 +3042,25 @@ static void upscale_standin(VkExec *ex) {
     cb_res(ex);
     vk_exec_barrier(ex);   // ends the pass; the source is written
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                            .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(ex->cb, &di);
+    VkImage source = rgb9e5 ? upscale_rgb9e5(ex) : up_src.image;
+    if (vk_dump_armed) vk_dump_upscale(ex, source, rgb9e5 ? VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 : up_src.format,
+                                     up_src.w, up_src.h, "source");
     VkImageBlit rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)up_src.w, (int32_t)up_src.h, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
     up_src.fresh = 0;
-    vkCmdBlitImage(ex->cb, up_src.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &rg, VK_FILTER_LINEAR);
+    vkCmdBlitImage(ex->cb, source, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &rg, VK_FILTER_LINEAR);
+    static int decoded;
+    if (rgb9e5 && !decoded++) rt_log("tensor: packed HDR source decoded through an independent RGB9E5 image");
 
     mb.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     vkCmdPipelineBarrier2(ex->cb, &di);
     ex->recorded++;
+    if (vk_dump_armed) vk_dump_upscale(ex, dst, dst_format, w, h, "destination");
     static int told;
     if (!told++) rt_log("tensor: upscale stand-in blits %ux%u to %ux%u (formats %d -> %d, usage %#x -> %#x)", up_src.w, up_src.h, w, h, (int)up_src.format, (int)dst_format, (unsigned)up_src.usage, (unsigned)dst_usage);
 }
