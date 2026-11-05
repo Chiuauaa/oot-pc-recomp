@@ -2872,6 +2872,35 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
             if (nvn2_is_tensor((const uint8_t *)(uintptr_t)ex->prog->sd[k].data)) {
                 static int told;
                 if (!told++) rt_log("tensor: the neural upscaler is replaced by a linear blit (OOT_RUN_TENSOR=1 runs it)");
+                static int tlog = -1, tn;
+                if (tlog < 0) tlog = getenv("OOT_TENSOR_LOG") != NULL;
+                if (tlog && tn < 400) {
+                    tn++;
+                    char s[1600];
+                    int o = snprintf(s, sizeof s, "tensor stage %d groups %dx%dx%d:", tn, d->x, d->y, d->z);
+                    vk_texture_lock();
+                    for (int kind = 0; kind < 2; kind++)
+                        for (int slot = 0; slot < (kind ? 32 : 128) && o < (int)sizeof s - 80; slot++) {
+                            uint64_t hh = kind ? ex->img[NVN_STAGE_CS][slot] : ex->tex[NVN_STAGE_CS][slot];
+                            if (!hh) continue;
+                            const VkTexImage *t = vk_texture_by_id_locked(&ex->tex_pool, (int)(hh & 0xfffff), NULL, NULL);
+                            if (t) o += snprintf(s + o, sizeof s - o, " %s%d=%d:%ux%u/f%d", kind ? "img" : "tex", slot, (int)(hh & 0xfffff), t->width, t->height, (int)t->format);
+                        }
+                    vk_texture_unlock();
+                    // only combinations not seen before (the bindings without the stage number and group count)
+                    static uint64_t seen[512];
+                    static int nseen;
+                    const char *b = strchr(s, ':');
+                    uint64_t hv = 1469598103934665603ull;
+                    for (const char *q = b ? b : s; *q; q++) hv = (hv ^ (unsigned char)*q) * 1099511628211ull;
+                    int dup = 0;
+                    for (int q = 0; q < nseen && !dup; q++) dup = seen[q] == hv;
+                    if (dup) tn--;
+                    else {
+                        if (nseen < 512) seen[nseen++] = hv;
+                        rt_log("%s", s);
+                    }
+                }
                 upscale_standin(ex);
                 return;
             }
