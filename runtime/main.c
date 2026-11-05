@@ -218,6 +218,29 @@ static uint64_t lifted_function(uintptr_t rip) {
 
 static int readable(uint64_t a, uint64_t n) { return plat_mem_readable(a, n); }
 
+// Itanium C++ RTTI of the object a guest register points to: [obj] is the vtable, [vtable - 8] the type_info and
+// [type_info + 8] its mangled name. Crash dumps use it to say what class a register holds (a game without symbols
+// still keeps its RTTI strings). Returns 0 unless every step is readable and the name is printable.
+static int rtti_name(uint64_t obj, char *out, int n) {
+    if (!obj || (obj & 7) || !readable(obj, 8)) return 0;
+    uint64_t vt = LD64(obj);
+    if ((vt & 7) || vt < 0x7000000000ull || !readable(vt - 8, 8)) return 0;
+    uint64_t ti = LD64(vt - 8);
+    if ((ti & 7) || ti < 0x7000000000ull || !readable(ti, 16)) return 0;
+    uint64_t nm = LD64(ti + 8);
+    if (nm < 0x7000000000ull || !readable(nm, 4)) return 0;
+    int i = 0;
+    for (; i < n - 1; i++) {
+        if (!readable(nm + i, 1)) return 0;
+        unsigned char ch = *(const unsigned char *)(uintptr_t)(nm + i);
+        if (!ch) break;
+        if (ch < 0x20 || ch > 0x7e) return 0;
+        out[i] = (char)ch;
+    }
+    out[i] = 0;
+    return i >= 2;
+}
+
 static void crash_handler(const PlatCrash *x) {
     static volatile int32_t busy;
     if (plat_xchg32(&busy, 1)) plat_exit(71);
@@ -242,6 +265,19 @@ static void crash_handler(const PlatCrash *x) {
             rt_logf("  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 4 == 3 ? "\n" : "");
         rt_logf("  sp  %016llx\n  pc  %016llx  lr %s\n", (unsigned long long)c->sp, (unsigned long long)c->pc,
                 ldr_describe(c->x[30], d, sizeof d));
+        // The stack words above sp hold the callee-saved registers of the callers; with the first word of what each points
+        // to (the vtable, for a C++ object) they tell the objects of the call chain apart when the game has no RTTI.
+        for (int i = 0; i < 24 && readable(c->sp + 8 * i, 8); i++) {
+            uint64_t w = LD64(c->sp + 8 * i);
+            if (w >= 0x100000000ull && !(w & 7) && readable(w, 8))
+                rt_logf("  [sp+%#x] %#llx -> %#llx\n", 8 * i, (unsigned long long)w, (unsigned long long)LD64(w));
+            else
+                rt_logf("  [sp+%#x] %#llx\n", 8 * i, (unsigned long long)w);
+        }
+        for (int i = 0; i < 29; i++) {   // registers that hold a C++ object: name its class
+            char nm[120];
+            if (rtti_name(c->x[i], nm, sizeof nm)) rt_logf("  x%-2d is a %s\n", i, nm);
+        }
         uint64_t fp = c->x[29];
         for (int n = 0; n < 32 && fp && !(fp & 7) && readable(fp, 16); n++) {
             uint64_t next = LD64(fp), lr = LD64(fp + 8);

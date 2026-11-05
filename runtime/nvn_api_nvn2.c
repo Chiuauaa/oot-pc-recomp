@@ -123,3 +123,63 @@ NVN2_NOT_RECORDED(nvnCommandBufferSetCopyEnableConditional)
 NVN2_NOT_RECORDED(nvnCommandBufferSetConservativeRasterMode)
 NVN2_MODE_NOT_RECORDED(nvnCommandBufferSetGeometryProcessingMode, NVN_MODE_GEOMETRY)
 NVN2_NOT_RECORDED(nvnCommandBufferSetRepresentativeFragmentTest)
+
+// ---- Procs OoT 1.1.1 asks for in addition (SDK 22). Same policy as above: accepted, nothing recorded, the first call of each logged.
+#define NVN2_RET0(n)                                                                                               \
+    NVN_API(n) {                                                                                                   \
+        static volatile int32_t logged;                                                                            \
+        ret_x(c, 0);                                                                                               \
+        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) rt_log("nvn2: " #n " answers 0");                  \
+    }
+// NVNboolean: not registered, keeps the normal clear (as nvnDeviceRegisterFastClearStencil)
+NVN2_RET0(nvnDeviceRegisterFastClearDepthIndex)
+// NVNboolean: not registered, keeps the normal clear
+NVN2_RET0(nvnDeviceRegisterFastClearStencilIndex)
+// NVNqueue *: the host keeps no primary queue (SetPrimaryQueue only logs), so none
+NVN2_RET0(nvnQueueBuilderGetPrimaryQueue)
+// ray-tracing modules: none
+NVN2_RET0(nvnProgramBuilderGetRayTracingModuleCount)
+// ray-tracing module data: none
+NVN2_RET0(nvnProgramBuilderGetRayTracingModuleData)
+// DLSS network builder: no texture pool
+NVN2_RET0(nvnDlssNetworkBuilderGetTexturePool)
+// DLSS network builder: no texture ids
+NVN2_RET0(nvnDlssNetworkBuilderGetTextureIDs)
+// cooperative vectors are not offered: size 0
+NVN2_RET0(nvnDeviceGetCooperativeVectorMatrixSize)
+// cooperative vectors are not offered: not converted
+NVN2_RET0(nvnDeviceConvertCooperativeVectorMatrix)
+// dirty tile maps are not offered
+NVN2_RET0(nvnDirtyTileMapParametersGetTexture)
+// dirty tile maps are not offered
+NVN2_RET0(nvnDirtyTileMapParametersGetInputs)
+// dirty tile maps are not offered
+NVN2_RET0(nvnDirtyTileMapParametersGetOutputs)
+// uint64_t acquire timeout: the host waits for the swapchain image as long as it takes (an assumption; no title seen sets one)
+NVN_API(nvnWindowBuilderGetAcquireTimeout) { ret_x(c, ~0ull); }
+NVN_API(nvnWindowGetAcquireTimeout) { ret_x(c, ~0ull); }
+// calls with no host effect
+NVN2_NOT_RECORDED(nvnCommandBufferComputeDirtyTileMapEx)
+NVN2_NOT_RECORDED(nvnCommandBufferConvertCooperativeVectorMatrix)
+NVN2_NOT_RECORDED(nvnCommandBufferSetComputeWorkloadPriority)
+NVN2_NOT_RECORDED(nvnCommandBufferSetGraphicsWorkloadPriority)
+NVN2_NOT_RECORDED(nvnCommandBufferSetResourceOccupancy)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetConstantColorTable)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetDefaults)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetDepthStencilMask)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetExpandFootprint)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetInputs)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetOutputs)
+NVN2_NOT_RECORDED(nvnDirtyTileMapParametersSetTexture)
+NVN2_NOT_RECORDED(nvnDlssNetworkResize)
+NVN2_NOT_RECORDED(nvnMultisampleStateGetSampleLocations)
+NVN2_NOT_RECORDED(nvnSamplerPoolWriteDescriptorTableData)
+NVN2_NOT_RECORDED(nvnTexturePoolWriteDescriptorTableData)
+NVN2_NOT_RECORDED(nvnWindowBuilderSetAcquireTimeout)
+NVN2_NOT_RECORDED(nvnWindowSetAcquireTimeout)
+// more procs seen in the same run
+NVN2_RET0(nvnDirtyTileMapParametersGetConstantColorTable)
+NVN2_RET0(nvnDirtyTileMapParametersGetDepthStencilMask)
+NVN2_RET0(nvnDirtyTileMapParametersGetExpandFootprint)
+NVN2_NOT_RECORDED(nvnCommandBufferSetFloatBlendClamp)
+NVN2_RET0(nvnCommandBufferGetAccelerationStructureVisualizationData)
