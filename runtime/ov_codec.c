@@ -54,6 +54,7 @@ typedef struct {
     uint16_t w, h;
     int64_t pts;       // nanoseconds (nn::TimeSpan)
     int eos;
+    int reached;       // the fence Acquire handed out has been signalled (a picture came, or a request was answered); survives Flush
     uint8_t *nv12;     // w*h luma, then cw*ch interleaved UV pairs
 } Slot;
 
@@ -235,7 +236,7 @@ static int decode_into(Dec *d, Slot *s, const uint8_t *data, size_t size, int64_
     LOG_FIRST("codec: first VP9 packet: %zu bytes, picture %ux%u", size, s->w, s->h);
     int n = 0;
     if (filled) {
-        s->state = S_FILLED, s->pts = pts, s->eos = end;
+        s->state = S_FILLED, s->pts = pts, s->eos = end, s->reached = 1;
         for (int k = 0; k < WAITERS; k++)
             if (s->waiter[k]) wake[n++] = s->waiter[k];
         memset(s->waiter, 0, sizeof s->waiter);
@@ -451,7 +452,7 @@ static void ov_vp9_acquire(Cpu *c) {
         if (d->slot[i].pool && d->slot[i].state == S_FREE) got = i;
     if (got >= 0) {
         Slot *s = &d->slot[got];
-        s->state = S_WAIT, s->seq = d->seq++, s->eos = 0;
+        s->state = S_WAIT, s->seq = d->seq++, s->eos = 0, s->reached = 0;
         memset(s->waiter, 0, sizeof s->waiter);
         *index = (uint32_t)got;
         if (fence) *fence = FENCE_TAG | (uint32_t)(d - decs) << 8 | (uint32_t)got;
@@ -616,6 +617,7 @@ static void ov_sp_request(Cpu *c) {
                     s->waiter[k] = ev, now = 0;
                     break;
                 }
+        if (now) s->reached = 1;   // the event is signalled below: its handler checks the fence with TryWaitNativeSync
         plat_mutex_unlock(&lock);
     }
     TRACE("sync point request %#x: %s", tok, now ? "signalled at once" : "waits for its picture");
@@ -635,6 +637,23 @@ static void ov_sp_cancel(Cpu *c) {
 // SDK 22 also waits on a sync point directly. With no GPU behind the handle every sync point is already reached (as the event
 // variants above signal at once): the waits return at once, TryWait and TimedWait report "reached".
 static void ov_sp_wait_now(Cpu *c) { ret_x(c, 1); }
+
+// bool nn::gs::TryWaitNativeSync(const NativeSyncHandle &): has the GPU reached the fence. A fence this decoder handed out
+// (Acquire's token, FENCE_TAG | decoder << 8 | buffer) is reached once its buffer held a picture or its event was signalled; every other handle is
+// reached at once, as before. Ocarina of Time's movie::VideoDecoder::Stop flushes the decoder, then acquires and releases
+// buffers for as long as the oldest queued frame's fence is reached. Flush puts the held pictures back to "waiting", so on the
+// console that loop ends; with every fence reached it ran forever and New Game never left the title movie.
+static void ov_gs_trywait(Cpu *c) {
+    const uint32_t *h = arg_p(c, 0);
+    uint32_t tok = h ? *h : 0;
+    int reached = 1;
+    if ((tok & 0xffff0000u) == FENCE_TAG && (tok >> 8 & 0xff) < DECODERS && (tok & 0xff) < SLOTS) {
+        plat_mutex_lock(&lock);
+        reached = decs[tok >> 8 & 0xff].slot[tok & 0xff].reached;
+        plat_mutex_unlock(&lock);
+    }
+    ret_x(c, (uint64_t)reached);
+}
 static void ov_sp_init(Cpu *c) { ret_x(c, 0); }
 // void DestroySyncPointEvent(SyncPointEventType *): the event stays bound for the next Create on the same object
 static void ov_sp_nop(Cpu *c) { (void)c; }
@@ -704,6 +723,7 @@ HOST_OVERRIDE("_ZN2nn6syncpt3sdk20CreateSyncPointEventEPNS1_18SyncPointEventType
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk13WaitSyncPointERKNS1_15SyncPointHandleE", ov_sp_wait_now);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk16TryWaitSyncPointERKNS1_15SyncPointHandleE", ov_sp_wait_now);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk18TimedWaitSyncPointERKNS1_15SyncPointHandleENS_8TimeSpanE", ov_sp_wait_now);
+HOST_OVERRIDE("_ZN2nn2gs17TryWaitNativeSyncERKNS0_16NativeSyncHandleE", ov_gs_trywait);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk10InitializeEv", ov_sp_init);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk12InitializeExEPvmNS1_14LibraryOptionsE", ov_sp_init);
 HOST_OVERRIDE("_ZN2nn6syncpt3sdk25InitializeMultiWaitHolderEPNS_2os19MultiWaitHolderTypeEPNS1_18SyncPointEventTypeE",

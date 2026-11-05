@@ -2293,6 +2293,19 @@ static void stall_report(unsigned sec) {
         else
             rt_log("stall: h%#x prio %d core %d waits %-7s on %#llx (obj %#llx) entry %s", t->handle, t->prio, t->cur_core,
                    w, (unsigned long long)t->waddr, (unsigned long long)t->wobj, ldr_describe(t->entry, e, sizeof e));
+        // The guest call stack by the frame-pointer chain: [fp] the caller's fp, [fp + 8] the return address.
+        const Cpu *c = t->cur ? t->cur : t->cpu;
+        if (!c) continue;
+        char f[96];
+        rt_log("stall:     lr %s", ldr_describe(c->x[30], f, sizeof f));
+        uint64_t fp = c->x[29];
+        for (int d = 0; d < 14 && fp && !(fp & 7) && plat_mem_readable(fp, 16); d++) {
+            uint64_t ret = *(const uint64_t *)(uintptr_t)(fp + 8), up = *(const uint64_t *)(uintptr_t)fp;
+            if (!ret) break;
+            rt_log("stall:     #%d %s", d, ldr_describe(ret, f, sizeof f));
+            if (up <= fp) break;
+            fp = up;
+        }
     }
     unlock();
 }
