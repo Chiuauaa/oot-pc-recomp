@@ -2786,21 +2786,80 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 
 // ---- dispatch and uniform buffer updates
 
+// ---- the upscaler's stand-in (Ocarina of Time)
+// The picture a compute shader wrote last (the video's NV12 -> RGBA conversion is one), kept as the source of the blit.
+static struct { VkImage image; uint32_t w, h; VkFormat format; VkImageUsageFlags usage; } up_src;
+
+// The bound storage image of the compute stage with the largest area (and its size), or NULL.
+static const VkTexImage *largest_storage_image(VkExec *ex) {
+    const VkTexImage *best = NULL;
+    for (int slot = 0; slot < 8; slot++) {
+        uint64_t h = ex->img[NVN_STAGE_CS][slot];
+        if (!h) continue;
+        const VkTexImage *t = vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL);
+        if (t && t->type == VK_IMAGE_TYPE_2D && t->layers == 1 && (!best || (uint64_t)t->width * t->height > (uint64_t)best->width * best->height)) best = t;
+    }
+    return best;
+}
+
+static void upscale_source_note(VkExec *ex) {
+    vk_texture_lock();
+    const VkTexImage *t = largest_storage_image(ex);
+    if (t && t->width >= 1280 && t->height >= 720) up_src.image = t->image, up_src.w = t->width, up_src.h = t->height, up_src.format = t->format, up_src.usage = t->usage;
+    vk_texture_unlock();
+}
+
+// A tensor stage was dropped: if it binds a storage image larger than the last compute picture, scale that picture into it.
+static void upscale_standin(VkExec *ex) {
+    if (!up_src.image) return;
+    vk_texture_lock();
+    const VkTexImage *t = largest_storage_image(ex);
+    VkImage dst = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0;
+    VkFormat dst_format = VK_FORMAT_UNDEFINED;
+    VkImageUsageFlags dst_usage = 0;
+    if (t && t->width > up_src.w && t->height > up_src.h && t->image != up_src.image) {
+        dst = t->image, w = t->width, h = t->height, dst_format = t->format, dst_usage = t->usage;
+        vk_texture_storage_bound_locked(t);   // as a storage binding does: the GPU writes this image (what later samples must see)
+    }
+    vk_texture_unlock();
+    if (!dst) return;
+    cb_res(ex);
+    vk_exec_barrier(ex);   // ends the pass; the source is written
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT,
+                           .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    VkImageBlit rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)up_src.w, (int32_t)up_src.h, 1}},
+                      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+    vkCmdBlitImage(ex->cb, up_src.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &rg, VK_FILTER_LINEAR);
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier2(ex->cb, &di);
+    ex->recorded++;
+    static int told;
+    if (!told++) rt_log("tensor: upscale stand-in blits %ux%u to %ux%u (formats %d -> %d, usage %#x -> %#x)", up_src.w, up_src.h, w, h, (int)up_src.format, (int)dst_format, (unsigned)up_src.usage, (unsigned)dst_usage);
+}
+
 static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     if (d->x <= 0 || d->y <= 0 || d->z <= 0) return;
     static int skip = -1;   // DKB_SKIP_COMPUTE=1: drop every direct dispatch (bisecting GPU faults)
     if (skip < 0) skip = getenv("DKB_SKIP_COMPUTE") != NULL;
     if (skip) return;
     if (!ex->prog) return warn_once(W_PROGRAM, "a dispatch without a bound program is skipped");
-    // OOT_SKIP_TENSOR=1: drop the dispatches of tensor-core stages (the game's neural upscaler) before the shader is
-    // translated. Measures what the upscaler costs on a GPU without tensor cores.
+    // The game's neural upscaler is a chain of tensor-core (HMMA) compute stages. A GPU without tensor cores runs them as
+    // software shuffles: tens of MB of SPIR-V and ~160 ms a frame. They are dropped by default (OOT_RUN_TENSOR=1 runs
+    // them) and the stage that would have written the larger picture gets a linear blit of the last picture a compute
+    // shader produced instead (see upscale_standin), which is what the network took as its input.
     static int skip_tensor = -1;
-    if (skip_tensor < 0) skip_tensor = getenv("OOT_SKIP_TENSOR") != NULL;
+    if (skip_tensor < 0) skip_tensor = getenv("OOT_RUN_TENSOR") == NULL;
     if (skip_tensor) {
         for (uint32_t k = 0; k < ex->prog->nstage; k++)
             if (nvn2_is_tensor((const uint8_t *)(uintptr_t)ex->prog->sd[k].data)) {
                 static int told;
-                if (!told++) rt_log("tensor: neural upscaler dispatches are skipped (OOT_SKIP_TENSOR)");
+                if (!told++) rt_log("tensor: the neural upscaler is replaced by a linear blit (OOT_RUN_TENSOR=1 runs it)");
+                upscale_standin(ex);
                 return;
             }
     }
@@ -2822,6 +2881,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     ex->recorded++;
     note_work(ex, 2, (uint64_t)d->x * (uint64_t)d->y * (uint64_t)d->z);
+    upscale_source_note(ex);
     if (vk_dump_armed) vk_dump_dispatch(ex, cs, p, info, d);
 }
 
