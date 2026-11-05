@@ -1418,6 +1418,7 @@ static void feedback_written(VkExec *ex, const VkPipeState *s) {
 static void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate,
                           VkDescriptorImageInfo *out, VkImage *image);
 
+
 // Sampled-texture descriptors per (handle, resource type, separate), kept while nothing they derive from changed: the
 // slot's resolution and texture entry (slot_still) and the samplers (vk_sampler_gen); the layout is set again on every
 // hit from the images in the feedback layout (in_fbl of the image kept with it). The first binding of a slot in a submission (vk_texture_epoch) still makes the slot lookup
@@ -2788,7 +2789,7 @@ static void op_draw_idx_ind(VkExec *ex, const p_draw_idx_ind *d) {
 
 // ---- the upscaler's stand-in (Ocarina of Time)
 // The picture a compute shader wrote last (the video's NV12 -> RGBA conversion is one), kept as the source of the blit.
-static struct { VkImage image; uint32_t w, h; VkFormat format; VkImageUsageFlags usage; } up_src;
+static struct { VkImage image; uint32_t w, h; VkFormat format; VkImageUsageFlags usage; int fresh; } up_src;   // fresh: not blitted since written
 
 // The bound storage image of the compute stage with the largest area (and its size), or NULL.
 static const VkTexImage *largest_storage_image(VkExec *ex) {
@@ -2802,16 +2803,26 @@ static const VkTexImage *largest_storage_image(VkExec *ex) {
     return best;
 }
 
-static void upscale_source_note(VkExec *ex) {
+// After a compute dispatch: the largest storage image its shader declares (not every slot: the slots keep the images of
+// earlier dispatches, the stand-in's own destination among them).
+static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
+    const VkTexImage *best = NULL;
     vk_texture_lock();
-    const VkTexImage *t = largest_storage_image(ex);
-    if (t && t->width >= 1280 && t->height >= 720) up_src.image = t->image, up_src.w = t->width, up_src.h = t->height, up_src.format = t->format, up_src.usage = t->usage;
+    for (uint32_t i = 0; i < info->n_bindings; i++) {
+        const VkPipeBinding *b = &info->bindings[i];
+        if (b->kind != GFX_RES_IMG || !b->res || b->res->slot < 0 || b->res->slot >= 32) continue;
+        uint64_t h = ex->img[NVN_STAGE_CS][b->res->slot];
+        const VkTexImage *t = h ? vk_texture_by_id_locked(&ex->tex_pool, (int)(h & 0xfffff), NULL, NULL) : NULL;
+        if (t && t->type == VK_IMAGE_TYPE_2D && (!best || (uint64_t)t->width * t->height > (uint64_t)best->width * best->height)) best = t;
+    }
+    if (best && best->width >= 1280 && best->height >= 720)
+        up_src.image = best->image, up_src.w = best->width, up_src.h = best->height, up_src.format = best->format, up_src.usage = best->usage, up_src.fresh = 1;
     vk_texture_unlock();
 }
 
 // A tensor stage was dropped: if it binds a storage image larger than the last compute picture, scale that picture into it.
 static void upscale_standin(VkExec *ex) {
-    if (!up_src.image) return;
+    if (!up_src.image || !up_src.fresh) return;   // once per new picture: every stage of the chain would do it again
     vk_texture_lock();
     const VkTexImage *t = largest_storage_image(ex);
     VkImage dst = VK_NULL_HANDLE;
@@ -2833,7 +2844,9 @@ static void upscale_standin(VkExec *ex) {
     vkCmdPipelineBarrier2(ex->cb, &di);
     VkImageBlit rg = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)up_src.w, (int32_t)up_src.h, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)w, (int32_t)h, 1}}};
+    up_src.fresh = 0;
     vkCmdBlitImage(ex->cb, up_src.image, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, &rg, VK_FILTER_LINEAR);
+
     mb.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT, mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     mb.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
     vkCmdPipelineBarrier2(ex->cb, &di);
@@ -2881,7 +2894,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     vkCmdDispatch(ex->cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     ex->recorded++;
     note_work(ex, 2, (uint64_t)d->x * (uint64_t)d->y * (uint64_t)d->z);
-    upscale_source_note(ex);
+    upscale_source_note(ex, info);
     if (vk_dump_armed) vk_dump_dispatch(ex, cs, p, info, d);
 }
 
