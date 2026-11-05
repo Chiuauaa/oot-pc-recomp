@@ -25,6 +25,7 @@
 #include "fs.h"
 #include "host.h"
 #include "romfs_config.h"
+#include "romfs_cache.h"
 #include "romfs_path.h"
 #include "platform/platform.h"
 #include "sha256.h"
@@ -89,8 +90,26 @@ static double now_s(void) { return (double)plat_now_ns() / 1e9; }
 // ---- positional reads
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error.
 static int64_t read_at(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
+    static int stats = -1;
+    static uint64_t st_n, st_bytes, st_thaw, st_read, st_last, st_max;
+    if (stats < 0) stats = cfg_get("OOT_FS_STATS") != NULL;
+    uint64_t t0 = stats ? plat_now_ns() : 0;
     mem_thaw((uintptr_t)buf, n);   // the kernel's write would fail on a frozen page instead of faulting
+    uint64_t t1 = stats ? plat_now_ns() : 0;
     int64_t got = plat_file_pread(f, buf, n, off);
+    if (stats) {
+        uint64_t t2 = plat_now_ns();
+        __atomic_add_fetch(&st_n, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&st_bytes, n, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&st_thaw, t1 - t0, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&st_read, t2 - t1, __ATOMIC_RELAXED);
+        if (t2 - t1 > st_max) st_max = t2 - t1;
+        if (t2 - st_last > 5000000000ull) {
+            st_last = t2;
+            rt_log("fs stats: %llu reads, %.1f MB, thaw %.2f s, pread %.2f s, slowest pread %.1f ms",
+                   (unsigned long long)st_n, st_bytes / 1e6, st_thaw / 1e9, st_read / 1e9, st_max / 1e6);
+        }
+    }
     if (got == -2)   // a read-only page in the buffer: a frozen region missed its thaw
         rt_log("RomFS: read of %u bytes into %p refused: the buffer is not writable", n, buf);
     return got < 0 ? -1 : got;
@@ -534,6 +553,7 @@ static void init_once(void *param) {
         }
     }
     overlay_init();
+    romfs_cache_init(image, file_count);
     rt_log("RomFS ready: %llu files, %zu overlays, %zu added, %.2f s", (unsigned long long)file_count, noverlay,
            nadded, now_s() - t0);
 #endif
@@ -626,6 +646,13 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
         if (f) id = identity_of(f);
         if (!f || memcmp(&id, &o->id, sizeof id))
             rt_fatal("RomFS overlay %s is missing or changed since the start check (restart the game)", o->path);
+    } else if (!(f = romfs_cache_open(i, entry(i).size))) {
+        // The game reads an opened file whole, in pieces of ~200 KB, from several loader threads at once. On a spinning
+        // disk each piece cost a seek (~20 MB/s, the disk busy all along); read ahead as one request, the file streams.
+        static int prefetch = -1;
+        if (prefetch < 0) prefetch = !(cfg_get("OOT_ROMFS_PREFETCH") && !strcmp(cfg_get("OOT_ROMFS_PREFETCH"), "0"));
+        Entry e = entry(i);
+        if (prefetch && e.size <= (64u << 20)) plat_file_prefetch(image, e.offset, e.size);
     }
     plat_mutex_lock(&lock);
     for (unsigned j = 1; j < NH; j++)
@@ -656,6 +683,10 @@ static int handle_source(uint64_t h, PlatFile **f, uint64_t *base, uint64_t *siz
         *f = of;
         *base = 0;
         *size = overlays[ov - 1].size;
+    } else if (of) {   // the file's copy in the cache (romfs_cache.c)
+        *f = of;
+        *base = 0;
+        *size = entry(i - 1).size;
     } else {
         Entry e = entry(i - 1);
         *f = image;
@@ -700,7 +731,11 @@ void romfs_close(uint64_t h) {
         rt_fatal("RomFS: close of invalid file handle %#llx", (unsigned long long)h);
     uint64_t j = h - ROMFS_HANDLE_BASE;
     plat_mutex_lock(&lock);
-    PlatFile *of = handle_ovl[j] ? handle_file[j] : NULL;
+    PlatFile *of = handle_file[j];
+    if (!of && handles[j]) {   // read from the image: a copy for the next time
+        Entry e = entry(handles[j] - 1);
+        romfs_cache_note(handles[j] - 1, e.offset, e.size);
+    }
     handles[j] = 0;
     handle_ovl[j] = 0;
     handle_file[j] = NULL;

@@ -287,6 +287,7 @@ void plat_file_close(PlatFile *f);
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error, -2 when the OS refused to write into buf
 // (a read-only page).
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off);
+void plat_file_prefetch(PlatFile *f, uint64_t off, uint64_t n);   // a hint: the range will be read soon (may do nothing)
 // What changes when the file is replaced or written: its volume, file id, size, last write and creation (on Linux,
 // status change) times in the OS's units. 0 on failure.
 typedef struct { uint64_t volume, file_id, size, write_time, create_time; } PlatFileId;
@@ -299,6 +300,7 @@ enum { PLAT_FS_OK, PLAT_FS_NOT_FOUND, PLAT_FS_EXISTS, PLAT_FS_NOT_EMPTY, PLAT_FS
 enum { PLAT_FS_MISSING = -1, PLAT_FS_FILE, PLAT_FS_DIR, PLAT_FS_LINK };   // plat_fs_kind; LINK: a symbolic link or
                                                                          // reparse point, never followed
 int plat_fs_kind(const char *path);
+uint64_t plat_fs_free_bytes(const char *path);           // free bytes for this user on path's disk; UINT64_MAX unknown
 int plat_fs_mkdir(const char *path);                      // PLAT_FS_EXISTS when something is there
 int plat_fs_rmdir(const char *path);                      // an empty directory, or a link to one
 int plat_fs_unlink(const char *path);                     // a file or a link; a read-only one too
