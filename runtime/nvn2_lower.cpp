@@ -51,7 +51,16 @@ Lowered *lower(const uint8_t *control, const uint8_t *code) {
         const auto r = capture.Observe(insn, static_cast<uint32_t>(native.size() - 1));
         if (r != Shader::Ampere::ProgramCaptureState::Result::Continue) break;
     }
-    const auto lowered = Shader::Ampere::LowerToMaxwell(native, "full");
+    // The SPH shader type picks the lowering's stage options: 4 geometry, 2 tessellation control, 3 tessellation evaluation.
+    // "full" matrix mode (tensor off) is what this host has always asked for.
+    Shader::Ampere::LoweringOptions options;
+    if (gfx) {
+        const uint32_t sph_type = (w0 >> 10) & 15;
+        options.geometry = sph_type == 4;
+        if (sph_type == 2) options.tessellation_stage = Shader::Ampere::TessellationStage::Control;
+        else if (sph_type == 3) options.tessellation_stage = Shader::Ampere::TessellationStage::Evaluation;
+    }
+    const auto lowered = Shader::Ampere::LowerToMaxwell(native, options);
     if (!lowered) {
         rt_log("nvn2: Ampere lowering failed at +%#x: %.*s", lowered.error_offset, (int)lowered.error.size(),
                lowered.error.data());
