@@ -1397,6 +1397,10 @@ static RtThread *thr_new(int prio, int core, uint64_t mask) {
 
 static void thr_link(RtThread *t) {   // holding G
     t->handle = h_new(O_THREAD, t);
+    // Newer SDKs (OoT 1.1.1, SDK 22) take the caller's own thread handle from TLR+0x110 as the owner tag of their
+    // mutexes (nn::os::detail::InternalCriticalSection::IsLockedByCurrentThread compares it with the lock word). A
+    // zero there equals the word of every free mutex, so the SDK saw each one as already held and aborted.
+    *(uint32_t *)(t->tlr + 0x110) = t->handle;
     t->id = g_next_id++;
     t->all = g_all;
     g_all = t;
