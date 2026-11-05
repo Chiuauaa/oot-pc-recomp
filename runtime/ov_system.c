@@ -265,6 +265,19 @@ static void ov_report_save(Cpu *c) {   // Result PlayReport::Save() and Save(con
     ret_x(c, 0);
 }
 static void ov_result_ok(Cpu *c) { ret_x(c, 0); }   // RequestImmediateTransmission, AddInternetConnectionStatus
+// AsyncContext PlayReport::Send(const account::Uid &): returned through x8. A context built from a Result has no IPC object, and
+// its GetCompletionEvent hands out an event already signalled. OoT sends a report when the opening cutscene ends and waits
+// on that event; with no prepo:u service the send stopped the game.
+static void ov_prepo_send(Cpu *c) {
+    int64_t n = plat_inc64(&reports);
+    if (n % 100 == 1) rt_log("prepo: play report kept local (not sent), %lld so far", (long long)n);
+    static uint64_t ctor;
+    if (!ctor && !(ctor = ldr_symbol("_ZN2nn5prepo12AsyncContextC1ENS_6ResultE")))
+        rt_fatal("prepo: nn::prepo::AsyncContext::AsyncContext(Result) is not loaded");
+    uint64_t out = c->x[8];
+    rt_call(c, ctor, 2, out, 0);
+    c->x[0] = out;
+}
 
 // nn::nfp: no NFC reader
 static volatile int32_t nfp_state;
@@ -899,6 +912,7 @@ HOST_OVERRIDE("_ZN2nn2oe22PopNotificationMessageEv", ov_pop);
 HOST_OVERRIDE("_ZN2nn5prepo10PlayReport4SaveEv", ov_report_save);
 HOST_OVERRIDE("_ZN2nn5prepo10PlayReport4SaveERKNS_7account3UidE", ov_report_save);
 HOST_OVERRIDE("_ZN2nn5prepo28RequestImmediateTransmissionEv", ov_result_ok);
+HOST_OVERRIDE("_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE", ov_prepo_send);   // OoT sends one after the opening
 HOST_OVERRIDE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3nfp10InitializeEv", ov_nfp_initialize);
 HOST_OVERRIDE("_ZN2nn3nfp8FinalizeEv", ov_nfp_finalize);
