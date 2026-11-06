@@ -37,7 +37,8 @@ objects Ninja just rebuilt (new mtime). A mismatch deletes the object, Ninja rec
 summary line. A fork checks the hardlinked generated objects against build/<version>/obj/objects.sha256 (read-only; a
 bad shared object stops the fork and asks for a main build run, which recompiles it and breaks the shared inode).
 
-Compile jobs share a memory budget (MEM_BUDGET, default the smaller of 50 GiB and 80% of RAM) at JOB_MEM per job, so a
+Compile jobs default to one per logical processor but one, and share a memory budget (MEM_BUDGET, default the smaller
+of 50 GiB and 80% of RAM) at JOB_MEM per job, so a
 big machine does not run out of memory on the largest chunks. Each phase reports its wall time and the peak memory
 of its processes (Windows job object accounting: committed private bytes).
 
@@ -368,14 +369,22 @@ def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=
         '',
     ]
     objs = {}
+    edges = []
     for mod, files in mods.items():
         objs[mod] = []
         for f in files:
             o = out / 'obj' / mod / (f.stem + '.o')
-            if not prebuilt:
-                lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}')
-                lines.append('  pool = gen')
-            objs[mod].append(o)
+            edges.append((o, f))
+            objs[mod].append(o)   # the link keeps the manifest order
+    if not prebuilt:
+        # Ninja starts edges of equal weight in manifest order, so the slowest compiles go first (by their time in the
+        # last build, else by source size). A few chunks take over 200 s each; listed in chunk order they started about
+        # a minute in, and the last minutes of a full build ran on two to six cores.
+        took = previous_compile_ms(out)
+        edges.sort(key=lambda e: (took.get(ninja_path(e[0]), -1), e[1].stat().st_size), reverse=True)
+        for o, f in edges:
+            lines.append(f'build {ninja_path(o)}: cc_gen {ninja_path(f)}')
+            lines.append('  pool = gen')
     rt = []
     sources = runtime_sources(skip)
     if make_lib:
@@ -650,6 +659,20 @@ def run_measured(cmd, env):
     return code, dt, info.PeakProcessMemoryUsed, info.PeakJobMemoryUsed
 
 
+def previous_compile_ms(out):
+    """Ninja output path -> compile milliseconds of its last run, from out/.ninja_log (empty when there is none)."""
+    took = {}
+    try:
+        text = (out / '.ninja_log').read_text(errors='replace')
+    except OSError:
+        return took
+    for line in text.splitlines():
+        p = line.split('	')
+        if len(p) >= 4 and p[0].isdigit() and p[1].isdigit():
+            took[p[3]] = int(p[1]) - int(p[0])
+    return took
+
+
 def total_ram():
     if not WIN:
         return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
@@ -801,7 +824,8 @@ def main():
 
     cpus = os.cpu_count() or 1
     budget = min(MEM_BUDGET, int(total_ram() * 0.8))
-    jobs = args.jobs or max(1, min(cpus, budget // JOB_MEM))
+    # One logical processor stays free so the desktop and a running game stay responsive during a build.
+    jobs = args.jobs or max(1, min(max(1, cpus - 1), budget // JOB_MEM))
     missing = [n for n in names if n not in hashes]
     if missing:
         sys.exit(f'{expected}: no exefs_sha256 for {missing}')
