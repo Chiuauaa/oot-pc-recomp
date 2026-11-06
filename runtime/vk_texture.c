@@ -225,6 +225,10 @@ static int bind_pool_memory(VkCtx *c, Tex *e, VkImage img, uint64_t guest_size) 
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(c->device, img, &req);
     if ((e->f.depth || e->f.stencil) && req.size > guest_size) return 0;
+    // An image in a stand-in format (ASTC decoded to RGBA8 or BC3 where the device lacks ASTC) is several times its
+    // storage: 4x for 4x4 blocks, 16x for 8x8. Bound at the storage address it would cover the textures after it in
+    // the pool, and its own uploads would overwrite them. Such an image gets memory of its own when it does not fit.
+    if (e->f.vk != e->f.ideal && req.size > guest_size) return 0;
     VkMemSpan sp;
     if (!req.size) return 0;   // an image the device could not lay out (image_size)
     if (!vk_mem_resolve_existing(e->pub.addr, req.size, &sp) || !sp.alloc || sp.alloc_offset % req.alignment) return 0;
