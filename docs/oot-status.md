@@ -2,6 +2,19 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: retain translator warnings and verify the loaded-scene replay
+
+- Review PR #1 and implement optional `OOT_XLATE_LOG` diagnostics without changing
+  shader outputs or the service reply protocol. Unavailable log paths are non-fatal.
+- Replay 252 stored variants with the actual host alignment; every module matches
+  a captured module byte for byte. Find 1,571 warnings across 30 shaders, including
+  unresolved global loads and dropped bindless accesses in passes 68, 121 and 128.
+- The central terrain/sky/composite shaders emit no such warnings. Do not claim
+  these warnings explain their brightness without tracing the affected resources.
+- Validate concurrent child-process logging, missing-path behavior and the existing
+  translator smoke test. Keep the current loaded game undisturbed and retain the
+  separately built diagnostic translator under ignored `warning-log-20/xlate`.
+
 ## 6 November 2026: native composite and full sky-lighting buffer checked
 
 - Follow the cited composite to native SASS: scene transform, bloom addition,

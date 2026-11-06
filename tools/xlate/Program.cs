@@ -264,8 +264,35 @@ static class SwshXlate
         public int QueryHostStorageBufferOffsetAlignment() => _job["sbuf_align"] is JsonNode n ? (int)n : 16;
         // "subgroup": n: lanes per subgroup when the host cannot pin 32 (AMD GCN/Vega run 64): ballots and votes span n lanes.
         public int QueryHostSubgroupSize() => _job["subgroup"] is JsonNode n ? (int)n : 32;
-        // The translator's own warnings (a global access with no storage buffer found, ...), with DMSH_STACK set.
-        public void Log(string message) { if (Environment.GetEnvironmentVariable("DMSH_STACK") != null) Console.Error.WriteLine(message); }
+        static readonly object WarningLogLock = new();
+        // --serve children have no retained stderr. Key optional warnings by translation request;
+        // an unavailable diagnostic file must not fail translation or alter stdout replies.
+        public void Log(string message)
+        {
+            if (Environment.GetEnvironmentVariable("DMSH_STACK") != null) Console.Error.WriteLine(message);
+            string path = Environment.GetEnvironmentVariable("OOT_XLATE_LOG");
+            if (string.IsNullOrEmpty(path)) return;
+            lock (WarningLogLock)
+            {
+                for (int attempt = 0; attempt < 50; attempt++)
+                {
+                    try
+                    {
+                        // Exclude other writers until the complete record has been flushed.
+                        using var file = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                        using var writer = new StreamWriter(file);
+                        writer.WriteLine($"{_job["key"]} {message}");
+                        return;
+                    }
+                    catch (IOException) when (attempt < 49) { System.Threading.Thread.Sleep(2); }
+                    catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                    {
+                        Console.Error.WriteLine($"Shader warning log unavailable: {error.Message}");
+                        return;
+                    }
+                }
+            }
+        }
     }
 
 

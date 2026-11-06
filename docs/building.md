@@ -81,6 +81,13 @@ of them.
    .venv\Scripts\python tools\build_xlate.py
    ```
 
+Translator warnings can be retained with `OOT_XLATE_LOG=<file>`. The parent directory must already exist.
+Each record begins with the translation request key. This also works for `--serve` children, whose stderr is not
+retained by the runtime. It does not change stdout replies or shader code; a failed diagnostic write does not fail
+translation. Concurrent writers retry for a bounded interval, so persistent contention can still lose a warning.
+Cache hits do not translate and therefore produce no new warnings. Use a separate cache for a full diagnostic run;
+do not infer that an existing cached shader has no warnings from an empty log.
+
 5. Lift the modules to C, write the RomFS overlay (the frame-rate fix), then compile and link
    `build\<ver>\totk.exe`:
 

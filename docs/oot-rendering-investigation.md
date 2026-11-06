@@ -4,6 +4,44 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Translator warning file implemented and audited against captured outputs
+
+Review [PR #1](https://github.com/Chiuauaa/oot-pc-recomp/pull/1), head
+`754c70e0a4a651e921fd2ed4046be74f34809c1c`: it proposes warning-file diagnostics,
+not a rendering correction. Implement the same environment contract independently
+in `tools/xlate/Program.cs::Accessor.Log`, with exclusive append writers, bounded
+sharing retries and non-fatal handling of unavailable paths. `OOT_XLATE_LOG` is
+optional; stdout remains the service reply channel. No code was copied from the PR.
+
+Build the translator separately under ignored `warning-log-20/xlate`. Replay 252
+stored input variants whose exact source occurs in the loaded-map capture from
+`bright-sh-light-19`. Reconstruct texture/image, vertex/output, compute-root and
+local-size answers from the saved inputs, including the actual NVIDIA host option
+`sbuf_align=16` reported in the game log. All 252 resulting modules are byte-identical
+to captured modules. Omitting that host option reproduces only 132; that incomplete
+comparison must not be used as evidence of production behavior.
+
+The matching replay emits 1,571 warnings across 30 native shader identities:
+1,438 unresolved global loads and 133 unresolved bindless texture accesses
+(114 array, 19 plain 2D). They occur in passes 68, 121 and 128 of this particular
+capture. Follow the producer/consumer dependencies before attributing landscape
+brightness to them. Terrain material `78e6bf688b49647c`, its vertex stage
+`6b8da6ef1d54cdaa`, sky producer `5638f0cfa2897d74`, stone material
+`413d85cd84a24ef0` and composite `73320e720a317817` emit no warnings in this
+replay. An absence of these warnings does not establish correct shader semantics.
+The user-identified composite remains the amplification point; the PR does not
+itself fix the excess reflection supplied to it.
+
+Validation: four central shaders produce identical outputs with logging disabled
+and enabled; the existing service smoke test validates SPIR-V and malformed-request
+recovery; eight parallel service processes append eight intact keyed records; an
+unavailable parent directory retains a successful translation and stdout reply.
+Private evidence stays in `build/oot-fix/warning-log-20`: `host-jobs.json`,
+`host-warnings.log`, `host-audit-summary.json`, `host-warning-passes.json` and
+separate output modules. The running game and its camera have not been interrupted.
+The diagnostic translator is built separately, not substituted into that already
+running process. No specular-removal adjustment has been installed by this change.
+
 ### Native composite audited and all twelve sky coefficients compared
 
 The user asks to follow the actual code for `bright-culling-18/capture-21` pass
