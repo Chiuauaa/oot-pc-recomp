@@ -1,0 +1,49 @@
+--- a/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
++++ b/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs
+@@ -413,9 +413,9 @@
+             bool extended)
+         {
+             if (context.TranslatorContext.GpuAccessor.QueryStorageBufferRuntimeCandidates() &&
+-                size is not (LsSize.B32 or LsSize.B64 or LsSize.B128))
+-            {
+-                throw new System.NotSupportedException("Storage candidates v1 supports naturally aligned B32/B64/B128 global loads only.");
++                size is not (LsSize.U8 or LsSize.S8 or LsSize.U16 or LsSize.S16 or LsSize.B32 or LsSize.B64 or LsSize.B128))
++            {
++                throw new System.NotSupportedException("Storage candidates v1 supports byte, naturally aligned halfword and B32/B64/B128 global loads only.");
+             }
+             // Naturally aligned 8/16-byte accesses cannot carry between their
+             // scalar words. Get40BitsAddress handles the initial offset carry;
+--- a/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
++++ b/src/Ryujinx.Graphics.Shader/Translation/Optimizations/GlobalToStorage.cs
+@@ -417,10 +417,11 @@
+             GtsContext gtsContext, ResourceManager resourceManager, IGpuAccessor gpuAccessor,
+             TargetLanguage targetLanguage, BasicBlock block, Operation operation)
+         {
+-            if (operation.StorageKind != StorageKind.GlobalMemory ||
++            bool smallLoad = operation.Inst == Instruction.Load && IsSmallInt(operation.StorageKind);
++            if ((operation.StorageKind != StorageKind.GlobalMemory && !smallLoad) ||
+                 (operation.Inst != Instruction.Load && operation.Inst != Instruction.Store && !operation.Inst.IsAtomic()))
+             {
+-                throw new NotSupportedException("Storage candidates v1 supports aligned 32-bit global operations only.");
++                throw new NotSupportedException("Storage candidates v1 supports byte/halfword loads and aligned 32-bit global operations only.");
+             }
+
+             bool storageUnaligned = gpuAccessor.QueryHasUnalignedStorageBuffer();
+@@ -518,7 +519,16 @@
+                 Operand words = context.StorageBufferLength(binding);
+                 Operand inRange = context.BitwiseAnd(context.ICompareEqual(deltaHigh, Const(0)),
+                     context.ICompareLessUnsigned(word, words));
+-                inRange = context.BitwiseAnd(inRange, context.ICompareEqual(context.BitwiseAnd(deltaLow, Const(3)), Const(0)));
++                // A byte selects any lane of the resolved word; a halfword must stay naturally aligned.
++                // ArrayLength bounds the actual uint load, including the last accessible descriptor word.
++                int alignmentMask = operation.StorageKind switch
++                {
++                    StorageKind.GlobalMemoryS8 or StorageKind.GlobalMemoryU8 => 0,
++                    StorageKind.GlobalMemoryS16 or StorageKind.GlobalMemoryU16 => 1,
++                    _ => 3,
++                };
++                inRange = context.BitwiseAnd(inRange,
++                    context.ICompareEqual(context.BitwiseAnd(deltaLow, Const(alignmentMask)), Const(0)));
+
+                 Operand skip = Label();
+                 context.BranchIfFalse(skip, inRange);

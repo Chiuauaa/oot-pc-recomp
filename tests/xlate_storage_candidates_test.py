@@ -275,15 +275,31 @@ class CandidateTest(unittest.TestCase):
 
     def test_unsupported_widths_fail_before_scalarization(self):
         jobs = []
-        for key, store, size in (('load8', False, 0), ('store8', True, 0),
-                                 ('load16', False, 2), ('store16', True, 2), ('unaligned128', False, 7)):
+        for key, store, size in (('store8', True, 0), ('store16', True, 2), ('unaligned128', False, 7)):
             ops = original.instructions(True)
             for i, op in enumerate(ops):
                 if op >> 51 == (0xEED8000000000000 if store else 0xEED0000000000000) >> 51:
                     ops[i] = (op & ~(7 << 48)) | (size << 48)
             jobs.append(packet(key, encoded(ops), storage_candidates_version=1))
         replies = self.translate(jobs, valid=False)
-        self.assertTrue(all('naturally aligned B32/B64/B128 global' in x for x in replies))
+        self.assertTrue(all('global stores only' in x or 'global loads only' in x for x in replies))
+
+    def test_subword_loads_keep_guards_and_signedness(self):
+        jobs = []
+        for size in range(4):
+            ops = original.instructions(True)
+            for i, op in enumerate(ops):
+                if op >> 51 == 0xEED0000000000000 >> 51:
+                    ops[i] = (op & ~(7 << 48)) | (size << 48)
+            jobs.append(packet('subword_load_' + str(size), encoded(ops), storage_candidates_version=1))
+        self.translate(jobs)
+        for size, job in enumerate(jobs):
+            ops = list(instructions((args.out / (job['key'] + '.spv')).read_bytes()))
+            self.assertGreater(guarded_memory_blocks((args.out / (job['key'] + '.spv')).read_bytes(),
+                                                    {r['binding'] for r in self.reflection(job['key'])['sbufs']}), 0)
+            if size in (1, 3):
+                self.assertTrue(any(op == 202 for op, _ in ops), 'signed load lost sign extraction')
+            self.assertTrue(all(r['flags'] & 0x80 for r in self.reflection(job['key'])['sbufs']))
 
     def test_original_wide_register_values_and_canaries(self):
         for bits in (64, 128):
@@ -379,7 +395,8 @@ class CandidateTest(unittest.TestCase):
         work = args.out / 'resource-probe'
         work.mkdir(exist_ok=True)
         project = work / 'probe.csproj'
-        shader_project = args.ryu_src / 'src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj'
+        # MSBuild resolves ProjectReference relative to the generated probe project.
+        shader_project = (args.ryu_src / 'src/Ryujinx.Graphics.Shader/Ryujinx.Graphics.Shader.csproj').resolve()
         source = ROOT / 'tests/storage_candidates_resource_probe.cs'
         project.write_text('<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType>'
                            '<TargetFramework>net10.0</TargetFramework><EnableDefaultCompileItems>false</EnableDefaultCompileItems>'
