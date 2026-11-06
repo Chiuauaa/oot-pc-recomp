@@ -1662,6 +1662,23 @@ static void mirror_create(PoolRec *r) {
                  n / 1048576.0, used / 1048576.0, budget / 1048576.0);
         return refuse(r, MR_BUDGET, why);
     }
+    // OOT_MIRROR_MAX_PCT=<p> (default 0: no cap): mirrors together stay under p% of the VRAM budget. A pool is mirrored
+    // whole at its first buffer bind, texture bytes included, while each sampled texture also has an image of its own
+    // (ASTC decoded to RGBA8: 4-16x its storage), so on an 8 GB card mirrors can take the room textures need.
+    static int64_t mirror_pct = -1;
+    if (mirror_pct < 0) {
+        const char *e = cfg_get("OOT_MIRROR_MAX_PCT");
+        mirror_pct = e && *e ? atoll(e) : 0;
+        if (mirror_pct < 0 || mirror_pct > 100) mirror_pct = 0;
+        if (mirror_pct) rt_log("mem: mirrors capped at %lld%% of the VRAM budget (OOT_MIRROR_MAX_PCT)", (long long)mirror_pct);
+    }
+    if (mirror_pct && budget &&
+        (uint64_t)__atomic_load_n(&m_live_bytes, __ATOMIC_RELAXED) + n > budget / 100 * (uint64_t)mirror_pct) {
+        char why[128];
+        snprintf(why, sizeof why, "its %.1f MiB mirror would pass OOT_MIRROR_MAX_PCT (%lld%% of %.0f MiB)", n / 1048576.0,
+                 (long long)mirror_pct, budget / 1048576.0);
+        return refuse(r, MR_BUDGET, why);
+    }
     plat_mutex_lock(&gen_lock);
     mrep.sync_queries += snap_regions(r0, r1, mepoch);
     int untracked = 0;
