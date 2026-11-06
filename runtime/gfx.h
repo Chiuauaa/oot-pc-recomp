@@ -26,7 +26,8 @@ double gfx_window_refresh_hz(void);                        // refresh rate of th
 int gfx_window_focused(void);
 
 // ---- shader service client (gfx_shader.c)
-enum { GFX_STAGE_VS, GFX_STAGE_TCS, GFX_STAGE_TES, GFX_STAGE_GS, GFX_STAGE_FS, GFX_STAGE_CS };
+enum { GFX_STAGE_VS, GFX_STAGE_TCS, GFX_STAGE_TES, GFX_STAGE_GS, GFX_STAGE_FS, GFX_STAGE_CS,
+       GFX_STAGE_TS, GFX_STAGE_MS };   // TS/MS: NVN 2 task and mesh stages (gfx_shader_get_mesh)
 enum { GFX_TEX_1D = 1, GFX_TEX_1D_ARRAY, GFX_TEX_BUFFER, GFX_TEX_2D, GFX_TEX_2D_ARRAY, GFX_TEX_2D_MS,
        GFX_TEX_2D_MS_ARRAY, GFX_TEX_3D, GFX_TEX_CUBE, GFX_TEX_CUBE_ARRAY };   // gfx_shader.c tex_names order
 enum { GFX_TYPE_FLOAT, GFX_TYPE_SINT, GFX_TYPE_UINT };
@@ -55,6 +56,10 @@ uint32_t nvn2_native_kind(const uint8_t *control, const uint8_t *code); // nativ
 int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_control, const uint8_t **out_code);
 const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
                                 const uint8_t *c1, const GfxShaderAnswers *a);   // blocks; NULL on failure (counted)
+// An NVN 2 native task (GFX_STAGE_TS) or mesh (GFX_STAGE_MS) stage, from the game's own control and code (not lowered),
+// translated by tools/mesh_xlate (mesh_xlate --serve). Blocks on a miss; cached in memory and in the shader cache
+// folder; a failure is remembered. Only the texture/image answers of a are used.
+const GfxShader *gfx_shader_get_mesh(int stage, const uint8_t *control, const uint8_t *code, const GfxShaderAnswers *a);
 // As gfx_shader_get with c1 inside the code, but a shader in neither cache is queued to a background translation and
 // NULL returned with *pending = 1 until it is ready. A failed translation stays failed (*pending = 0).
 const GfxShader *gfx_shader_get_async(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,

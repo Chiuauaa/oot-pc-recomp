@@ -34,6 +34,9 @@ typedef struct VkCtx {
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker,
         has_astc_ldr;                       // textureCompressionASTC_LDR (enabled when reported)
+    // VK_EXT_mesh_shader with taskShader and meshShader (NVN 2 task/mesh draws, vk_exec.c OP_DRAW_MESH); its limits.
+    int has_mesh_shader;
+    VkPhysicalDeviceMeshShaderPropertiesEXT mesh_props;
     // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass that
     // an earlier draw of the pass wrote. TOTK_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
     // old behaviour); VK_FEEDBACK_LAYOUT with VK_EXT_attachment_feedback_loop_layout and dynamicRenderingLocalRead

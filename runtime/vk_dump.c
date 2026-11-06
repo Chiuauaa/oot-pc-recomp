@@ -912,6 +912,15 @@ void vk_dump_mesh(VkExec *ex, const void *payload) {
             uint32_t kind = nvn2_native_kind(ctl, code);
             if (kind != UINT32_MAX) sp(&b, "(native-kind=%u)", kind);
         }
+        // Which NVN stages hold resources at this draw: NVN 2 binds task/mesh resources under its own stage numbers.
+        static const int probe_st[] = {0, 3, 4, 6, 7};
+        sp(&b, " bound:");
+        for (unsigned k = 0; k < sizeof probe_st / sizeof *probe_st; k++) {
+            int st = probe_st[k], nu = 0, nt = 0;
+            for (int i = 0; i < 18; i++) nu += ex->ubo[st][i].addr != 0;
+            for (int i = 0; i < 128; i++) nt += ex->tex[st][i] != 0;
+            sp(&b, " st%d ubo %d tex %d;", st, nu, nt);
+        }
         rt_log("vk: %s targets: %s", b.s ? b.s : "", targets);
         free(b.s);
     }

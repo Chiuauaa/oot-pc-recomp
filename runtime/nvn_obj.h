@@ -88,6 +88,9 @@ typedef struct {
     NVNshaderData sd[6];
     uint64_t serial;                    // back-end resolved-result key
     uint8_t *owned_control;             // host-tagged portable controls, retained until replay releases this program
+    // The game's own NVN 2 control and code of the task (0) and mesh (1) stage, native kinds 6 and 7. Lowering may
+    // replace a mesh stage in sd; the mesh translator (tools/mesh_xlate) needs the native original.
+    NVNshaderData mesh_native[2];
 } prog_t;                                                                                FITS(prog_t, NVNprogram);
 _Static_assert(sizeof(prog_t) <= 0xa0, "NVN2 program allocation stride");
 

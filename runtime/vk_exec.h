@@ -11,6 +11,9 @@
 #include "nvn_api.h"
 #include "vk.h"
 
+// NVN stages whose bound resources the executor keeps (VkExec.ubo and the handle tables).
+#define VK_EXEC_STAGES 8
+
 // Dynamic state the next draw must record (VkExec.dirty). vk_exec_record sets them all at the start of each command
 // buffer; the state ops set theirs; vk_exec_draw.c clears what it recorded.
 enum {
@@ -81,8 +84,10 @@ typedef struct VkExec {
     const prog_t *prog;                  // OP_BIND_PROGRAM
     int32_t prog_stages;
     NVNbufferRange vbuf[16];             // OP_BIND_VBUF
-    p_bind_buf ubo[6][18], ssbo[6][16];  // OP_BIND_UBO / OP_BIND_SSBO per stage and index
-    uint64_t tex[6][128], samp[6][128], img[6][32];   // OP_BIND_TEX / OP_BIND_SAMP / OP_BIND_IMG handles per stage
+    // Per NVN stage: 0-5 as in NVN 1 (vertex, fragment, geometry, tessellation control and evaluation, compute) and
+    // NVN 2's 6 and 7, which the game binds task/mesh resources under (VK_EXEC_STAGES).
+    p_bind_buf ubo[VK_EXEC_STAGES][18], ssbo[VK_EXEC_STAGES][16];  // OP_BIND_UBO / OP_BIND_SSBO per stage and index
+    uint64_t tex[VK_EXEC_STAGES][128], samp[VK_EXEC_STAGES][128], img[VK_EXEC_STAGES][32];   // OP_BIND_TEX / _SAMP / _IMG
     uint32_t push[2][NVN2_ROOT_TABLES][NVN2_ROOT_WORDS];   // graphics root 0 (bank 24), compute roots in packed c0
     uint64_t push_set[2][NVN2_ROOT_TABLES];                // words written; used by the graphics blit fallback
 

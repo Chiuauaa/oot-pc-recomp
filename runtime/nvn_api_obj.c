@@ -436,12 +436,16 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
         rt_log("nvn: ProgramSetShaders with %d stages at %p", n, (const void *)sd);
         return 0;
     }
-    NVNshaderData next[6] = {0};
+    NVNshaderData next[6] = {0}, mesh_native[2] = {0};
     uint8_t *owned = NULL;
     if (n) memcpy(next, sd, (size_t)n * sizeof *sd);
     for (int i = 0; i < n; i++) {   // NVN 2 stages are lowered to the NVN 1 shape (nvn2_lower.cpp)
         const uint8_t *ctl = next[i].control, *code = (const uint8_t *)(uintptr_t)next[i].data, *nctl, *ncode;
         gfx_shader_nvn2_dump(ctl, code);   // only with DKB_SHADER_DUMP
+        if (ctl && code && gfx_shader_is_nvn2(ctl)) {
+            uint32_t kind = nvn2_native_kind(ctl, code);
+            if (kind == 6 || kind == 7) mesh_native[kind - 6] = next[i];
+        }
         if (gfx_shader_is_nvn2(ctl) && nvn2_lower(ctl, code, &nctl, &ncode))
             next[i] = (NVNshaderData){(NVNbufferAddress)(uintptr_t)ncode, nctl};
         ctl = next[i].control;
@@ -461,6 +465,7 @@ static int prog_set_shaders(prog_t *o, int n, const NVNshaderData *sd) {
     prog_release(o);
     o->nstage = (uint32_t)n;
     memcpy(o->sd, next, sizeof next);
+    memcpy(o->mesh_native, mesh_native, sizeof mesh_native);
     o->owned_control = owned;
     o->serial = nvn_new_serial();
     NVN_LOG("ProgramSetShaders %p n=%d data0=%#llx", (void *)o, n, n ? (unsigned long long)next[0].data : 0ull);

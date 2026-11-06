@@ -583,7 +583,7 @@ static int reflection_valid(const char *res, uint64_t size) {
     if (!st) return 0;
     st = strchr(st + 7, '"');
     return st && (!strncmp(st, "\"vs\"", 4) || !strncmp(st, "\"ps\"", 4) || !strncmp(st, "\"cs\"", 4) ||
-                  !strncmp(st, "\"gs\"", 4));
+                  !strncmp(st, "\"gs\"", 4) || !strncmp(st, "\"ts\"", 4) || !strncmp(st, "\"ms\"", 4));
 }
 
 // Every instruction after the header has a word count and the last one ends at the module's end: a module with
@@ -1100,7 +1100,8 @@ static int reflect(GfxShader *s, int flags) {
     const char *whole = json_token_end(js, end, 0), *stage = json_member(js, end, "stage");
     if (!whole || json_space(whole, end) != end) return 0;
     s->stage = json_string_is(stage, end, "vs") ? GFX_STAGE_VS : json_string_is(stage, end, "ps") ? GFX_STAGE_FS :
-               json_string_is(stage, end, "cs") ? GFX_STAGE_CS : json_string_is(stage, end, "gs") ? GFX_STAGE_GS : -1;
+               json_string_is(stage, end, "cs") ? GFX_STAGE_CS : json_string_is(stage, end, "gs") ? GFX_STAGE_GS :
+               json_string_is(stage, end, "ts") ? GFX_STAGE_TS : json_string_is(stage, end, "ms") ? GFX_STAGE_MS : -1;
     if (s->stage < 0) return 0;
     if (s->stage == GFX_STAGE_GS) {
         if (!host_gs_sg || !geometry_json(js, end, &s->geometry, s->geometry_skip, &s->geometry_source_passthrough)) return 0;
@@ -1794,6 +1795,170 @@ const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t
     const GfxShader *s = get_one(&r, stage, control, code, a);
     if (s) ans_note(&r, stage, control, code, a, s);
     return s;
+}
+
+// ---- NVN 2 task/mesh stages (tools/mesh_xlate/mesh_xlate.cpp)
+// One mesh_xlate --serve child, started on the first miss, answers in the translator's protocol (one job line, one
+// "ok <key>" / "fail <key> <why>" line) and writes <key>.spv and <key>.res.json into the shader cache folder, which
+// disk_load_from and reflect then read as for any other stage. The job names the stage's control and code by path:
+// both are written under <cache>/mesh-in once. Key: sha256 of a tag, the translator's identity (sha256 of its exe),
+// the stage, the control block, the code and the texture/image answers (types per c2 slot, image formats).
+// The executable: TOTK_MESH_XLATE, else mesh_xlate next to dkb.exe.
+static PlatMutex mesh_lock = PLAT_MUTEX_INIT;
+static Svc mesh_svc;
+static char mesh_exe[PATH_CAP];
+static uint8_t mesh_id[32];
+static int mesh_ready;                                     // -1: no translator; 1: mesh_exe and mesh_id set
+
+static int mesh_init(void) {                               // mesh_lock held
+    if (mesh_ready) return mesh_ready > 0;
+    paths();
+    const char *e = cfg_get("TOTK_MESH_XLATE");
+    char exe[PATH_CAP];
+    mesh_ready = -1;
+    if (e && *e && strlen(e) < sizeof mesh_exe) strcpy(mesh_exe, e);
+    else if (plat_exe_path(exe, sizeof exe) && plat_last_sep(exe)) {
+        *plat_last_sep(exe) = 0;
+        snprintf(mesh_exe, sizeof mesh_exe, "%.*s/mesh_xlate" PLAT_EXE_SUFFIX, (int)(sizeof mesh_exe - 32), exe);
+    }
+    uint64_t size = 0;
+    uint8_t *bytes = mesh_exe[0] ? read_file(mesh_exe, &size) : NULL;
+    if (!bytes || !cache_dir[0]) {
+        rt_log("gfx_shader: mesh translator not found (%s): task/mesh draws are skipped",
+               mesh_exe[0] ? mesh_exe : "<none>");
+        free(bytes);
+        return 0;
+    }
+    rt_sha256(bytes, (size_t)size, mesh_id);
+    free(bytes);
+    mesh_ready = 1;
+    return 1;
+}
+
+// JSON string body of s (quotes and backslashes escaped) into out; 0 when it does not fit.
+static int json_escape(const char *s, char *out, size_t cap) {
+    size_t n = 0;
+    for (; *s; s++) {
+        if ((unsigned char)*s < 0x20 || n + 3 >= cap) return 0;
+        if (*s == '"' || *s == '\\') out[n++] = '\\';
+        out[n++] = *s;
+    }
+    out[n] = 0;
+    return 1;
+}
+
+const GfxShader *gfx_shader_get_mesh(int stage, const uint8_t *control, const uint8_t *code, const GfxShaderAnswers *a) {
+    uint32_t ctl_size, len;
+    if ((stage != GFX_STAGE_TS && stage != GFX_STAGE_MS) || !a || !control || !code || !gfx_shader_is_nvn2(control) ||
+        !nvn2_sizes(control, &ctl_size, &len) || nvn2_native_kind(control, code) != (stage == GFX_STAGE_TS ? 6u : 7u))
+        return NULL;
+    plat_mutex_lock(&mesh_lock);
+    const GfxShader *result = NULL;
+    if (!mesh_init()) goto out;
+    // The key.
+    size_t total = 8 + 32 + 4 + ctl_size + len + 3 * 32;
+    uint8_t *buf = malloc(total), key[32];
+    if (!buf) goto out;
+    uint8_t *p = buf;
+    memcpy(p, "TKMESH01", 8), p += 8;
+    memcpy(p, mesh_id, 32), p += 32;
+    uint32_t st = (uint32_t)stage;
+    memcpy(p, &st, 4), p += 4;
+    memcpy(p, control, ctl_size), p += ctl_size;
+    memcpy(p, code, len), p += len;
+    memcpy(p, a->tex_type, 32), memcpy(p + 32, a->img_type, 32), memcpy(p + 64, a->img_format, 32);
+    rt_sha256(buf, total, key);
+    free(buf);
+    if ((result = mem_find(key))) goto out;
+    if (known_failed(key)) goto out;
+    GfxShader *s = disk_load_from(key, NULL, 0, 0);
+    if (s && gfx_shader_stage(s) == stage) { result = mem_insert(s); goto out; }
+    if (s) shader_free(s);
+    // Inputs on disk, then the job.
+    char hex[65], in_dir[PATH_CAP + 16], ctl_path[PATH_CAP + 96], code_path[PATH_CAP + 96];
+    key_hex(key, hex);
+    snprintf(in_dir, sizeof in_dir, "%s/mesh-in", cache_dir);
+    mkdir_p(in_dir);
+    snprintf(ctl_path, sizeof ctl_path, "%s/%s.ctl", in_dir, hex);
+    snprintf(code_path, sizeof code_path, "%s/%s.bin", in_dir, hex);
+    if ((!file_exists(ctl_path) && !plat_file_write_atomic(ctl_path, control, ctl_size)) ||
+        (!file_exists(code_path) && !plat_file_write_atomic(code_path, code, len))) {
+        rt_log("gfx_shader: cannot write mesh translator inputs under %s", in_dir);
+        goto out;
+    }
+    char ectl[2 * PATH_CAP + 200], ecode[2 * PATH_CAP + 200], eout[2 * PATH_CAP + 40], tex[8192], line[16384];
+    if (!json_escape(ctl_path, ectl, sizeof ectl) || !json_escape(code_path, ecode, sizeof ecode) ||
+        !json_escape(cache_dir, eout, sizeof eout)) goto out;
+    int t = snprintf(tex, sizeof tex, "\"tex\":{");
+    const char *sep = "";
+    for (int i = 0; i < 32; i++) {
+        int code_t = a->tex_type[i] & 0x3f;
+        if (code_t > 0 && code_t < COUNT(tex_names)) {
+            int n = snprintf(tex + t, sizeof tex - (size_t)t, "%s\"%d\":\"%s\"", sep, i, tex_names[code_t]);
+            if (n < 0 || (size_t)n >= sizeof tex - (size_t)t) goto out;
+            t += n;
+            sep = ",";
+        }
+    }
+    int n = snprintf(tex + t, sizeof tex - (size_t)t, "},\"img\":{");
+    if (n < 0 || (size_t)n >= sizeof tex - (size_t)t) goto out;
+    t += n;
+    sep = "";
+    for (int i = 0; i < 32; i++) {
+        int it = a->img_type[i], f = a->img_format[i];
+        if (it > 0 && it < COUNT(tex_names)) {
+            n = snprintf(tex + t, sizeof tex - (size_t)t, "%s\"%d\":{\"type\":\"%s\",\"fmt\":\"%s\"}", sep, i, tex_names[it],
+                         f > 0 && f < COUNT(fmt_names) ? fmt_names[f] : "R8G8B8A8Unorm");
+            if (n < 0 || (size_t)n >= sizeof tex - (size_t)t) goto out;
+            t += n;
+            sep = ",";
+        }
+    }
+    n = snprintf(tex + t, sizeof tex - (size_t)t, "}");
+    if (n < 0 || (size_t)n >= sizeof tex - (size_t)t) goto out;
+    int line_size = snprintf(line, sizeof line, "{\"job\":{\"key\":\"%s\",\"stage\":\"%s\",\"control\":\"%s\",\"code\":\"%s\",%s},\"out\":\"%s\"}",
+             hex, stage == GFX_STAGE_TS ? "ts" : "ms", ectl, ecode, tex, eout);
+    if (line_size < 0 || (size_t)line_size >= sizeof line) {
+        rt_log("gfx_shader: mesh translator request exceeds the line buffer");
+        goto out;
+    }
+    if (!mesh_svc.child) {
+        uint32_t err = 0;
+        mesh_svc.child = plat_child_start(mesh_exe, "--serve", &err);
+        mesh_svc.in_len = 0;
+        if (!mesh_svc.child) {
+            rt_log("gfx_shader: cannot start %s (error %lu)", mesh_exe, (unsigned long)err);
+            mesh_ready = -1;
+            goto out;
+        }
+    }
+    char reply[LINE_MAX_LEN];
+    uint64_t t0 = plat_now_ms();
+    if (!child_exchange(&mesh_svc, line, reply, sizeof reply)) {
+        rt_log("gfx_shader: the mesh translator stopped answering");
+        child_stop(&mesh_svc);
+        goto out;
+    }
+    if (strncmp(reply, "ok ", 3) || strcmp(reply + 3, hex)) {
+        rt_log("gfx_shader: mesh translation of %s stage %.16s failed: %s", stage == GFX_STAGE_TS ? "task" : "mesh", hex, reply);
+        note_failed(key);
+        plat_inc64(&n_failures);
+        goto out;
+    }
+    s = disk_load_from(key, NULL, 0, 0);
+    if (!s || gfx_shader_stage(s) != stage) {
+        rt_log("gfx_shader: mesh translation %.16s wrote an unusable result", hex);
+        if (s) shader_free(s);
+        note_failed(key);
+        goto out;
+    }
+    plat_inc64(&n_xlated);
+    rt_log("gfx_shader: %s stage %016llx translated in %llu ms", stage == GFX_STAGE_TS ? "task" : "mesh",
+           (unsigned long long)gfx_shader_nvn2_hash(control, code), (unsigned long long)(plat_now_ms() - t0));
+    result = mem_insert(s);
+out:
+    plat_mutex_unlock(&mesh_lock);
+    return result;
 }
 
 // ---- stored inputs (<cache>/in/<input id>.in, see the top)

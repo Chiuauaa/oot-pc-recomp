@@ -202,6 +202,7 @@ typedef struct {
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl;
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT fbl;
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
+    VkPhysicalDeviceMeshShaderFeaturesEXT mesh;
 } FeatureChain;
 
 static int create_device(void) {
@@ -209,7 +210,7 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne ? ne : 1, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[28];
+    const char *ext[32];
     uint32_t n_ext = 0;
     for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
 
@@ -249,6 +250,16 @@ static int create_device(void) {
     if (has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) { g_vk.has_memory_budget = 1; ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME; }
     // GPU breadcrumbs for a lost device (vk_crumbs.c): AMD's drivers and RADV report it.
     if (has_ext(ep, ne, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) { g_vk.has_buffer_marker = 1; ext[n_ext++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME; }
+    // NVN 2 task/mesh draws (OP_DRAW_MESH). TOTK_MESH=0 leaves the extension off, so mesh draws stay skipped.
+    int mesh_ext = 0;
+    {
+        const char *e = cfg_get("TOTK_MESH");
+        if (!(e && !strcmp(e, "0")) && has_ext(ep, ne, VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+            mesh_ext = 1;
+            ext[n_ext++] = VK_EXT_MESH_SHADER_EXTENSION_NAME;
+            CHAIN(mesh, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
+        }
+    }
     // Graphics pipeline library: chained last so it can be dropped again when vk_caps_gpl declines it.
     void **gpl_link = NULL;
     if (has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME) && has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME)) {
@@ -285,6 +296,22 @@ static int create_device(void) {
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension
+    if (mesh_ext) {
+        // Only task and mesh stages: the multiview, primitive shading rate and query variants each require further
+        // features to be enabled, and NVN 2 mesh draws need none of them.
+        g_vk.has_mesh_shader = c->mesh.taskShader && c->mesh.meshShader;
+        c->mesh.multiviewMeshShader = c->mesh.primitiveFragmentShadingRateMeshShader = c->mesh.meshShaderQueries = 0;
+        if (!g_vk.has_mesh_shader) c->mesh.taskShader = c->mesh.meshShader = 0;
+        g_vk.mesh_props = (VkPhysicalDeviceMeshShaderPropertiesEXT){
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                          .pNext = &g_vk.mesh_props};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        g_vk.mesh_props.pNext = NULL;
+        rt_log("vk: mesh shaders: %s (max output vertices %u, primitives %u, task payload %u bytes)",
+               g_vk.has_mesh_shader ? "task + mesh" : "not supported", g_vk.mesh_props.maxMeshOutputVertices,
+               g_vk.mesh_props.maxMeshOutputPrimitives, g_vk.mesh_props.maxTaskPayloadSize);
+    } else rt_log("vk: mesh shaders: off (%s)", cfg_get("TOTK_MESH") ? "TOTK_MESH=0" : "VK_EXT_mesh_shader not reported");
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
     g_vk.has_astc_ldr = h->textureCompressionASTC_LDR;
     {
