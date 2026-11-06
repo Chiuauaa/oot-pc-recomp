@@ -2,6 +2,16 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: task/mesh metadata matched to emitted modules
+
+- Add mesh contract version 1; reject reflection that disagrees with SPIR-V
+  stage, literal local sizes, output counts/topology or flat payload array.
+- Add a tested device-limit/payload compatibility helper for future pipelines.
+  It is not wired into replay; shared/output memory validation still remains.
+- 45 synthetic contract checks pass at O0/O2; all 41 retained scene modules
+  satisfy the production validator and `spirv-val`; runtime compilation passes.
+- Mesh draw execution remains pending. The remaining brightness is unresolved.
+
 ## 6 November 2026: task/mesh compiler client continued and bounded
 
 - Retain task/mesh native inputs and stage-6/7 resource bindings; add an

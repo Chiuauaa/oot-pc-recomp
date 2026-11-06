@@ -4,6 +4,35 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Task/mesh execution metadata now checked against emitted SPIR-V
+
+The runtime now requires mesh metadata version 1. `gfx_shader.c::mesh_json`
+parses exact integer fields and Boolean provenance; malformed/duplicate/missing
+fields fail. `mesh_spirv` requires one `main` entry point with the correct EXT
+execution model, MeshShadingEXT capability, exact literal LocalSize and mesh
+output vertex/primitive counts and triangle topology. It also checks the
+compiler's current payload ABI: at most one TaskPayloadWorkgroupEXT variable
+pointing to an array of unsigned 32-bit words of the declared size. Unknown,
+duplicate or mismatched execution modes fail. `gfx_shader_mesh` exposes the
+validated metadata to the future pipeline path.
+
+`vk_mesh_contract.h::vk_mesh_execution_limits` provides admission checks for
+per-axis and total workgroup sizes, mesh output counts, payload byte limits,
+and task/mesh payload size agreement. It is a tested helper, **not yet called
+by a mesh pipeline**, because that path still does not exist. It does not yet
+check shared memory/output memory bytes or interfaces; those must be reported
+and validated before execution is enabled.
+
+Tests: `tests/mesh_shader_contract_test.py` passes 45 original synthetic checks
+at O0 and O2, including malformed framing/JSON, mismatched stage/metadata,
+workgroup limits, output limits and payload sizes. The same production metadata
+validator accepts all 41 regenerated retained scene modules; all 41 also pass
+`spirv-val`. Shader-control tests retain 45 checks at each optimization and the
+runtime compiles. These checks establish consistency between compiler output
+and its reflection; they do not verify the inferred native control ABI or the
+visual result. No draw has been newly enabled and no residual brightness fix
+is claimed.
+
 ### Task/mesh service integration resumed; execution still pending
 
 The next agent's partial implementation preserves original task/mesh stage

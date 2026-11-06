@@ -124,6 +124,12 @@ typedef struct {
 } GfxShaderGeometry;
 // Ordinary GS contract; NULL for another stage. Translation support does not imply replay/pipeline support.
 const GfxShaderGeometry *gfx_shader_geometry(const GfxShader *s);
+typedef struct {
+    uint32_t local[3], payload_words, max_vertices, max_primitives, topology;
+    uint32_t inferred_registers;   // control-layout hypothesis, not a verified NVN driver ABI
+} GfxShaderMesh;
+// Validated task/mesh execution metadata; NULL for any other stage.
+const GfxShaderMesh *gfx_shader_mesh(const GfxShader *s);
 int gfx_shader_resources(const GfxShader *s, int kind, const GfxShaderRes **res);   // count of GFX_RES_* kind; array in *res
 // NVN 2 compute parameter-block layout, including the declared root-table word counts, or NULL.
 const Nvn2C0Layout *gfx_shader_c0_layout(const GfxShader *s);

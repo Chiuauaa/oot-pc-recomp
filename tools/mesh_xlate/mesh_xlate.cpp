@@ -424,7 +424,7 @@ std::string translate(const Json& job, const std::string& out_dir) {
         << "],\n  \"cbufs\": [" << cb.str() << "],\n  \"sbufs\": [" << sb.str() << "],\n  \"textures\": [" << tx.str()
         << "],\n  \"images\": [" << im.str() << "],\n  \"uses_frag_coord\": false,\n  \"frag_out_map\": 0,\n"
         << "  \"storage_candidates_version\": 0,\n  \"tex_queried\": [" << ints(env.tex_queried)
-        << "],\n  \"img_queried\": [" << ints(env.img_queried) << "],\n  \"mesh\": {\"local\": [" << program.workgroup_size[0]
+        << "],\n  \"img_queried\": [" << ints(env.img_queried) << "],\n  \"mesh\": {\"version\": 1, \"local\": [" << program.workgroup_size[0]
         << ", " << program.workgroup_size[1] << ", " << program.workgroup_size[2] << "], \"payload_words\": "
         << program.mesh.payload_words << ", \"max_vertices\": " << program.mesh.max_vertices << ", \"max_primitives\": "
         << program.mesh.max_primitives << ", \"topology\": " << env.topology << ", \"inferred_registers\": true, "

@@ -105,6 +105,7 @@ struct GfxShader {
     GfxShaderIo in[32], out[32];
     uint32_t local[3];
     GfxShaderGeometry geometry;
+    GfxShaderMesh mesh;
     uint32_t geometry_skip[8];                           // source mask, independent of queried draw answers
     int geometry_source_passthrough;
     unsigned geometry_position;                         // v2: Position input/output, malformed interface bit 4
@@ -843,6 +844,46 @@ static int geometry_json(const char *js, const char *end, GfxShaderGeometry *g, 
     return g->output != 0;
 }
 
+// Exact versioned metadata for the experimental compiler; do not interpret missing fields as defaults.
+static int mesh_json(const char *js, const char *end, int stage, GfxShaderMesh *m) {
+    memset(m, 0, sizeof *m);
+    const char *o = json_member(js, end, "mesh"), *oe;
+    if (!o || o == end || *o != '{' || !(oe = json_token_end(o, end, 0))) return 0;
+    uint32_t version;
+    if (!json_uint(o, oe, "version", &version) || version != 1) return 0;
+    const char *p = json_member(o, oe, "local");
+    if (!p || p == oe || *p++ != '[') return 0;
+    for (unsigned k = 0; k < 3; ++k) {
+        p = json_space(p, oe);
+        const char *q = json_token_end(p, oe, 0);
+        if (!q || p == q || !isdigit((unsigned char)*p)) return 0;
+        uint32_t v = 0;
+        for (; p < q; ++p) {
+            if (!isdigit((unsigned char)*p) || v > (UINT32_MAX - (uint32_t)(*p - '0')) / 10) return 0;
+            v = v * 10 + (uint32_t)(*p - '0');
+        }
+        if (!v) return 0;
+        m->local[k] = v;
+        p = json_space(p, oe);
+        if (p == oe || *p++ != (k == 2 ? ']' : ',')) return 0;
+    }
+    const char *inferred = json_member(o, oe, "inferred_registers");
+    {
+        // Booleans have no numeric prefix and the token scanner supplies their exact extent.
+        const char *q = inferred && inferred != oe ? json_token_end(inferred, oe, 0) : NULL;
+        if (!q || !((q - inferred == 4 && !memcmp(inferred, "true", 4)) ||
+                    (q - inferred == 5 && !memcmp(inferred, "false", 5)))) return 0;
+        m->inferred_registers = q - inferred == 4;
+    }
+    if (!json_uint(o, oe, "payload_words", &m->payload_words) || m->payload_words > UINT32_MAX / 4 ||
+        !json_uint(o, oe, "max_vertices", &m->max_vertices) ||
+        !json_uint(o, oe, "max_primitives", &m->max_primitives) ||
+        !json_uint(o, oe, "topology", &m->topology)) return 0;
+    if (stage == GFX_STAGE_MS)
+        return m->max_vertices && m->max_primitives && m->topology == 3;
+    return stage == GFX_STAGE_TS && !m->max_vertices && !m->max_primitives;
+}
+
 // The objects of the flat array `"name": [ {...}, ... ]`: calls fn for each object's [start, end). Returns the count.
 static int json_objects(const char *js, const char *name, void (*fn)(GfxShader *, int, const char *, const char *),
                         GfxShader *s, int kind) {
@@ -922,6 +963,64 @@ enum { OP_ENTRY_POINT = 15, OP_EXECUTION_MODE = 16, OP_TYPE_INT = 21, OP_TYPE_FL
        OP_TYPE_ARRAY = 28, OP_TYPE_STRUCT = 30, OP_TYPE_POINTER = 32, OP_CONSTANT = 43, OP_VARIABLE = 59, OP_DECORATE = 71,
        OP_MEMBER_DECORATE = 72,
        DEC_BUILTIN = 11, DEC_LOCATION = 30, DEC_COMPONENT = 31, SC_INPUT = 1, SC_OUTPUT = 3, EM_LOCAL_SIZE = 17 };
+
+// Match the compiler contract to one EXT task/mesh entry point and its literal execution modes.
+// The emitted payload ABI is one flat array of 32-bit unsigned words, shared identically by both stages.
+static int mesh_spirv(const GfxShader *s) {
+    const uint32_t *w = s->spirv;
+    const GfxShaderMesh *m = &s->mesh;
+    if (!w || s->words < 5 || w[0] != 0x07230203 || !w[3] || w[3] > 1000000) return 0;
+    uint32_t *types = calloc((size_t)w[3] * 4, sizeof *types);
+    if (!types) return 0;
+    uint32_t *uint32s = types, *constants = types + w[3], *arrays = types + 2*w[3], *pointers = types + 3*w[3];
+    uint32_t entry = 0, modes = 0, payloads = 0, capability = 0;
+    int valid = 0;
+    for (uint64_t i = 5; i < s->words;) {
+        uint32_t n = w[i] >> 16, op = w[i] & 65535;
+        if (!n || n > s->words - i) goto out;
+        const uint32_t *a = w + i + 1;
+        if (op == 17 && n == 2 && a[0] == 5283) capability = 1; // MeshShadingEXT
+        else if (op == OP_ENTRY_POINT) {
+            uint32_t model = s->stage == GFX_STAGE_TS ? 5364 : 5365;
+            if (n < 5 || entry || a[0] != model || !a[1] || a[1] >= w[3] ||
+                (n - 3)*4 < 5 || memcmp(a + 2, "main", 5)) goto out;
+            entry = a[1];
+        } else if (op == OP_EXECUTION_MODE) {
+            if (n < 3 || !entry || a[0] != entry) goto out;
+            uint32_t bit = 0;
+            if (a[1] == EM_LOCAL_SIZE) {
+                if (n != 6 || memcmp(a + 2, m->local, 12)) goto out;
+                bit = 1;
+            } else if (a[1] == 26) { // OutputVertices
+                if (s->stage != GFX_STAGE_MS || n != 4 || a[2] != m->max_vertices) goto out;
+                bit = 2;
+            } else if (a[1] == 5270) { // OutputPrimitivesEXT
+                if (s->stage != GFX_STAGE_MS || n != 4 || a[2] != m->max_primitives) goto out;
+                bit = 4;
+            } else if (a[1] == 5298) { // OutputTrianglesEXT
+                if (s->stage != GFX_STAGE_MS || n != 3 || m->topology != 3) goto out;
+                bit = 8;
+            } else goto out; // Extend the protocol explicitly when new execution modes are supported.
+            if (modes & bit) goto out;
+            modes |= bit;
+        } else if (op == 331) goto out; // OpExecutionModeId is not part of this literal-size contract.
+        else if (op == OP_TYPE_INT && n == 4 && a[0] < w[3]) uint32s[a[0]] = a[1] == 32 && a[2] == 0;
+        else if (op == OP_CONSTANT && n == 4 && a[0] < w[3] && a[1] < w[3] && uint32s[a[0]]) constants[a[1]] = a[2];
+        else if (op == OP_TYPE_ARRAY && n == 4 && a[0] < w[3] && a[1] < w[3] && a[2] < w[3] && uint32s[a[1]])
+            arrays[a[0]] = constants[a[2]];
+        else if (op == OP_TYPE_POINTER && n == 4 && a[0] < w[3] && a[2] < w[3] && a[1] == 5402)
+            pointers[a[0]] = arrays[a[2]];
+        else if (op == OP_VARIABLE && n >= 4 && a[2] == 5402) {
+            if (a[0] >= w[3] || !pointers[a[0]] || pointers[a[0]] != m->payload_words || ++payloads > 1) goto out;
+        }
+        i += n;
+    }
+    valid = entry && capability && modes == (s->stage == GFX_STAGE_TS ? 1u : 15u) &&
+            payloads == (m->payload_words != 0);
+out:
+    free(types);
+    return valid;
+}
 
 // The service emits one ordinary GS main with four execution modes. Validate those against JSON on every disk
 // load, including private/by-IID loads which have no original request. This is protocol validation, not spirv-val.
@@ -1103,6 +1202,9 @@ static int reflect(GfxShader *s, int flags) {
                json_string_is(stage, end, "cs") ? GFX_STAGE_CS : json_string_is(stage, end, "gs") ? GFX_STAGE_GS :
                json_string_is(stage, end, "ts") ? GFX_STAGE_TS : json_string_is(stage, end, "ms") ? GFX_STAGE_MS : -1;
     if (s->stage < 0) return 0;
+    if (s->stage == GFX_STAGE_TS || s->stage == GFX_STAGE_MS) {
+        if (!mesh_json(js, end, s->stage, &s->mesh) || !mesh_spirv(s)) return 0;
+    } else if (json_member(js, end, "mesh")) return 0;
     if (s->stage == GFX_STAGE_GS) {
         if (!host_gs_sg || !geometry_json(js, end, &s->geometry, s->geometry_skip, &s->geometry_source_passthrough)) return 0;
     } else if (json_member(js, end, "geometry_version") || json_member(js, end, "gs_input") ||
@@ -2622,6 +2724,9 @@ const GfxShader *gfx_shader_debug_compute_override(const GfxShader *s, uint64_t 
 
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }
 const GfxShaderGeometry *gfx_shader_geometry(const GfxShader *s) { return s->stage == GFX_STAGE_GS ? &s->geometry : NULL; }
+const GfxShaderMesh *gfx_shader_mesh(const GfxShader *s) {
+    return s && (s->stage == GFX_STAGE_TS || s->stage == GFX_STAGE_MS) ? &s->mesh : NULL;
+}
 
 int gfx_shader_resources(const GfxShader *s, int kind, const GfxShaderRes **res) {
     if (kind < 0 || kind >= GFX_RES_KINDS) return 0;

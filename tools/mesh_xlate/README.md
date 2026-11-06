@@ -32,3 +32,8 @@ They exercise production request generation with stubbed child/cache operations,
 including all 32 texture and image slots, escaped paths, exact reply identity,
 child disconnection and stage mismatches. Actual compiler/captured-game checks
 stay private under `build/oot-fix/mesh-compiler/`.
+
+Reflection now requires `mesh.version = 1`. The runtime compares its literal
+execution fields and flat payload array to SPIR-V before admitting the shader
+into its cache. Run `tests/mesh_shader_contract_test.py` for synthetic contract
+and device-limit checks. These checks do not verify the inferred native ABI.
