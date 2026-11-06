@@ -50,6 +50,7 @@ int gfx_shader_is_nvn2(const uint8_t *control);                          // NVN 
 uint64_t gfx_shader_nvn2_hash(const uint8_t *control, const uint8_t *code);   // DKB_SHADER_DUMP name, 0 if not NVN 2
 int nvn2_is_tensor(const uint8_t *code);   // 1 when a lowered NVN 2 stage uses the tensor cores (HMMA/LDSM)
 uint64_t nvn2_origin(const uint8_t *code);   // that name of the NVN 2 stage a lowered code buffer came from, or 0
+uint32_t nvn2_native_kind(const uint8_t *control, const uint8_t *code); // native control +0x56; UINT32_MAX: not known
 // NVN 2 stage -> NVN 1 control and Maxwell code (nvn2_lower.cpp); 0 when it does not lower
 int nvn2_lower(const uint8_t *control, const uint8_t *code, const uint8_t **out_control, const uint8_t **out_code);
 const GfxShader *gfx_shader_get(int stage, const uint8_t *control, const uint8_t *code, uint64_t code_size,
@@ -92,6 +93,7 @@ void gfx_shader_release_private(const GfxShader *s);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
 // Environment-only numerical tracing: replace one fragment module while retaining its resource interface.
 const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame);
+const GfxShader *gfx_shader_debug_compute_override(const GfxShader *s, uint64_t frame);
 uint64_t gfx_shader_failures(void);                         // failed translations; feeds GfxStats.shader_failures
 // Reflection: parsed once per shader from the translator's .res.json and the SPIR-V before it enters the cache.
 enum { GFX_RES_UBO, GFX_RES_SSBO, GFX_RES_TEX, GFX_RES_IMG, GFX_RES_KINDS };

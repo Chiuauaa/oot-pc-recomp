@@ -2424,7 +2424,12 @@ static int stage_diag_skip(const VkExec *ex, const GfxShader *vs) {
 
 static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const GfxShader *fs) {
     static int on = -1;
-    if (on < 0) on = !rt_game_version && cfg_bool("TOTK_FIX_VS_FAULT") && vk_ctx()->props.vendorID == 0x10de;   // 0: Bananza
+    // Bananza's NVIDIA workaround also matches Ocarina's ordinary world materials. Dropping those draws leaves
+    // the sky visible in their place. Keep the mitigation available only when explicitly requested.
+    if (on < 0) {
+        const char *e = getenv("TOTK_FIX_VS_FAULT");
+        on = !rt_game_version && e && *e == '1' && vk_ctx()->props.vendorID == 0x10de;
+    }
     if (!on || !vs || !fs) return 0;
     const uint8_t *ctl, *code = NULL;
     uint32_t len;
@@ -2439,6 +2444,36 @@ static int light_quad_fault_skip(const VkExec *ex, const GfxShader *vs, const Gf
     if (!lights || !(gfx_shader_inputs(vs, io) >> 9 & 1)) return 0;
     warn_once(W_FAULT_SKIP, "light-quad draws with ten instance streams are skipped on NVIDIA (#9; TOTK_FIX_VS_FAULT=0 draws them)");
     return 1;
+}
+
+// Local depth-coverage experiment. The optional file contains a hexadecimal colour-target address and NVN depth
+// function (3 EQUAL, 4 LEQUAL or 8 ALWAYS). Only read-only EQUAL draws into that target are affected. Removing the
+// file restores guest state; the recorded command state and depth writes remain unchanged.
+static void depth_coverage_probe(const VkExec *ex, VkPipeState *state) {
+    static int initialized;
+    static const char *path;
+    static uint64_t checked = UINT64_MAX, target;
+    static unsigned function;
+    if (!initialized) path = getenv("OOT_DEPTH_PROBE_FILE"), initialized = 1;
+    if (!path || !*path) return;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (checked == UINT64_MAX || frame >= checked + 60) {
+        unsigned long long address = 0;
+        unsigned next = 0;
+        FILE *file = fopen(path, "r");
+        int valid = file && fscanf(file, "%llx %u", &address, &next) == 2 && address &&
+                    (next == NVN_DEPTH_FUNC_EQUAL || next == NVN_DEPTH_FUNC_LEQUAL || next == NVN_DEPTH_FUNC_ALWAYS);
+        if (file) fclose(file);
+        if (!valid) address = 0, next = 0;
+        if (target != address || function != next)
+            rt_log("depth coverage probe: target %#llx function %u (0 restores guest state)", address, next);
+        target = address;
+        function = next;
+        checked = frame;
+    }
+    if (target && ex->color[0].tex && (uint64_t)(uintptr_t)ex->color[0].tex->mem == target &&
+        state->ds.dt && !state->ds.dw && state->ds.df == NVN_DEPTH_FUNC_EQUAL)
+        state->ds.df = function;
 }
 
 static struct { int on, valid, has_fs, has_gs; MemoKey k; const GfxShader *vs, *fs, *gs; } SM = {-1};
@@ -2576,7 +2611,10 @@ unsupported:
 
 // Pass, shaders, pipeline, fixed state and resources for a draw. 0: the draw is skipped.
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
-    if (ex->render_disabled) return 0;
+    if (ex->render_disabled) {
+        if (vk_dump_armed) vk_dump_draw_skip(ex, "render condition disabled");
+        return vk_exec_frame.cond_skips += ex->has_render_cond != 0, 0;
+    }
     static int skip_all = -1;   // DKB_SKIP_DRAWS=1: drop every draw (bisecting GPU faults)
     if (skip_all < 0) skip_all = getenv("DKB_SKIP_DRAWS") != NULL;
     if (skip_all) return 0;
@@ -2670,6 +2708,7 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (!geometry_feedback_safe(ex, vs, gs)) return 0;
     uint32_t fbl = feedback_prepare(ex, fs);
     VkPipeState s = ex->pipe;
+    depth_coverage_probe(ex, &s);
     s.vs = vs, s.fs = gfx_shader_debug_override(fs, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED)), s.gs = gs;
     s.feedback = (uint8_t)((fbl & 0xff ? 1 : 0) | (fbl & 0x100 ? 2 : 0));
     s.prim = (uint8_t)prim;
@@ -2751,7 +2790,10 @@ static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) {
     if (fbl & ex->fb_dirty) feedback_barrier(ex);
     feedback_written(ex, &s);
     bind_vertex_buffers(ex);
-    if (vk_dump_armed) vk_dump_draw(ex, &s, p, info);
+    if (vk_dump_armed) {
+        vk_dump_draw(ex, &s, p, info);
+        vk_dump_replay_note(ex, "draw-ready prim=%d count=%d", prim, count);
+    }
     vk_exec_oq_draw(ex);
     return 1;
 }
@@ -2999,7 +3041,8 @@ static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
     vk_texture_lock();
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *b = &info->bindings[i];
-        if (b->kind != GFX_RES_IMG || !b->res || b->res->slot < 0 || b->res->slot >= 32) continue;
+        if (b->kind != GFX_RES_IMG || !b->res || !(b->res->flags & 4) ||
+            b->res->slot < 0 || b->res->slot >= 32) continue;   // TextureUsageFlags.ImageStore
         uint64_t h = ex->img[NVN_STAGE_CS][b->res->slot];
         view_t view;
         int has_view = 0;
@@ -3011,12 +3054,17 @@ static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
                      (t->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || t->format == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32);
         }
     }
-    // A linear replacement for the tensor network needs colour values, not its packed
-    // integer transport. Use the packing dispatch's unique declared HDR colour input.
-    // Diagnostic only: this bypass omits the packing pass's colour processing and
-    // produces excessive brightness in gameplay. Keep it off in ordinary runs.
+    // The linear replacement cannot consume a tensor network's integer colour transport as ordinary HDR.
+    // Select the unique same-size floating-point colour input of the transport dispatch instead. This is a
+    // resource-topology rule, independent of shader identity: variants with the same contract take the same path.
+    // Ambiguous inputs retain the previous source. This deliberately bypasses network-specific preprocessing;
+    // it is the linear fallback's approximation, not an emulation of the real tensor network's output.
+    // 0 keeps packed transport for comparisons; 1 enables the same selection explicitly.
     static int unpacked = -1;
-    if (unpacked < 0) unpacked = getenv("OOT_LINEAR_UNPACKED_SOURCE") != NULL;
+    if (unpacked < 0) {
+        const char *value = getenv("OOT_LINEAR_UNPACKED_SOURCE");
+        unpacked = !value || !*value || *value != '0';
+    }
     if (best && packed && unpacked) {
         const VkTexImage *colour = NULL;
         int ambiguous = 0;
@@ -3024,9 +3072,13 @@ static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
             const VkPipeBinding *b = &info->bindings[i];
             if (b->kind != GFX_RES_TEX || !b->res || b->res->slot < 0 || b->res->slot >= 32) continue;
             uint64_t handle = ex->tex[NVN_STAGE_CS][b->res->slot];
-            const VkTexImage *input = handle ? vk_texture_by_id_locked(&ex->tex_pool, (int)(handle & 0xfffff), NULL, NULL) : NULL;
-            if (!input || input->image == best->image || input->width != best->width || input->height != best->height ||
-                input->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32) continue;
+            view_t input_view;
+            int has_input_view = 0;
+            const VkTexImage *input = handle ? vk_texture_by_id_locked(&ex->tex_pool, (int)(handle & 0xfffff), &input_view, &has_input_view) : NULL;
+            if (!input || input->type != VK_IMAGE_TYPE_2D || input->image == best->image ||
+                input->width != best->width || input->height != best->height ||
+                input->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
+                (has_input_view && input_view.set_format && input_view.format != NVN_FORMAT_R11G11B10F)) continue;
             if (colour && colour->image != input->image) { ambiguous = 1; break; }
             colour = input;
         }
@@ -3034,7 +3086,7 @@ static void upscale_source_note(VkExec *ex, const VkPipeInfo *info) {
             best = colour;
             packed = 0;
             static int told;
-            if (!told++) rt_log("tensor: linear stand-in uses the unpacked HDR colour input");
+            if (!told++) rt_log("tensor: linear stand-in uses the unique colour input before integer tensor transport");
         }
     }
     if (best && ((best->width >= 1280 && best->height >= 720) || packed))
@@ -3178,6 +3230,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);   // synchronous: a skipped dispatch changes results
     if (!cs) return skipped_dispatch_log(ex, "direct", d->x, d->y, d->z);
     const VkPipeInfo *info = NULL;
+    cs = gfx_shader_debug_compute_override(cs, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
     vk_exec_barrier(ex);   // ends the pass; earlier writes are visible to the shader
@@ -3207,6 +3260,7 @@ static void op_dispatch_ind(VkExec *ex, const p_dispatch_ind *d) {
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present, NULL, 0);
     if (!cs) return skipped_dispatch_log(ex, "indirect", 0, 0, 0);
     const VkPipeInfo *info = NULL;
+    cs = gfx_shader_debug_compute_override(cs, __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
     vk_exec_barrier(ex);

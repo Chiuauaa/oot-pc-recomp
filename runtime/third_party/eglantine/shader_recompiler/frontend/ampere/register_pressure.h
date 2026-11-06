@@ -52,6 +52,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         break;
     case 0x807:
     case 0x808:
+    case 0xc08: // FSEL with uniform B: only destination and A are GPR operands.
     case 0x809: // FMNMX immediate: the literal is not a register operand.
     case 0x803: // P2R: preserve both the destination and its merge source.
     case 0x923:
@@ -182,6 +183,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x210:
     case 0x211:
     case 0x212:
+    case 0x219: // Register SHF reads low/high words and the shift amount, and writes one GPR.
         operand(16);
         operand(24);
         operand(32);

@@ -73,11 +73,12 @@ void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
             o += (size_t)snprintf(list + o, sizeof list - o, " %p:%ux%u/%#x*%u", (const void *)fw[i].mem, fw[i].w,
                                   fw[i].h, fw[i].fmt, fw[i].n);
     }
-    rt_log("frame %llu: submits %llu passes %llu draws %llu/%llu mesh %llu clears %llu copies %llu dispatches %llu; present %p "
+    rt_log("frame %llu: submits %llu passes %llu draws %llu/%llu mesh %llu cond %llu/%llu pending/%llu off/%llu skipped clears %llu copies %llu dispatches %llu; present %p "
            "%ux%u/%#x written %d; feedback draws %llu barriers %llu restarts %llu layouts %llu; targets%s",
            (unsigned long long)frame, (unsigned long long)f->submits,
            (unsigned long long)f->passes, (unsigned long long)f->draws, (unsigned long long)f->draws_seen,
-           (unsigned long long)f->mesh_draws, (unsigned long long)f->clears, (unsigned long long)f->copies, (unsigned long long)f->dispatches,
+           (unsigned long long)f->mesh_draws, (unsigned long long)f->cond_pending, (unsigned long long)f->cond_evals,
+           (unsigned long long)f->cond_off, (unsigned long long)f->cond_skips, (unsigned long long)f->clears, (unsigned long long)f->copies, (unsigned long long)f->dispatches,
            p ? (const void *)p->mem : NULL, p ? p->d.width : 0, p ? p->d.height : 0, p ? (uint32_t)p->d.format : 0,
            hit, (unsigned long long)f->fb_draws, (unsigned long long)f->fb_barriers, (unsigned long long)f->fb_restarts,
            (unsigned long long)f->fb_layouts, list);
@@ -878,6 +879,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
+        if (vk_dump_armed) vk_dump_replay_op(ex, h->op, a);
         switch (h->op) {
         case OP_END: return;
         case OP_BEGIN: break;

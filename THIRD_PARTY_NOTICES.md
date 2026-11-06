@@ -4,7 +4,7 @@ Code copied or adapted from another project is listed here with its source, the 
 
 | Component | Source and commit | License | Used in |
 |---|---|---|---|
-| Eglantine Ampere (SM86) to Maxwell shader lowering and program capture | https://github.com/zortos293/Lichii @ `724aede4` (nx2 baseline), with selected Ocarina fixes from `82b95a65` and `b3284778` (full hashes in `runtime/third_party/eglantine/UPSTREAM_COMMIT`; `src/shader_recompiler/frontend/ampere/lower_to_maxwell.h`, `program_capture.h`, `instruction.h`, `geometry_exit.h`, `register_pressure.h`), a descendant of https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork @ `1dd40d8`, Copyright 2026 Eden Emulator Project; encoding reference Mesa NAK `sm70_encode.rs` (MIT, Copyright 2022 Collabora, Ltd.) | GPL-3.0-or-later | `runtime/third_party/eglantine/` (with a local guarded-offset proof adaptation), `tools/dkb_lower_test.cpp`; the reason DKB Recomp is GPL-3.0-or-later |
+| Eglantine Ampere (SM86) to Maxwell shader lowering and program capture | https://github.com/zortos293/Lichii @ `724aede4` (nx2 baseline), with selected Ocarina fixes from `82b95a65`, `b3284778` and `f356d39b` (full hashes in `runtime/third_party/eglantine/UPSTREAM_COMMIT`; `src/shader_recompiler/frontend/ampere/lower_to_maxwell.h`, `program_capture.h`, `instruction.h`, `geometry_exit.h`, `register_pressure.h`), a descendant of https://git.eden-emu.dev/Franseven/PokeDinner-a-Eglantine-Fork @ `1dd40d8`, Copyright 2026 Eden Emulator Project; encoding reference Mesa NAK `sm70_encode.rs` (MIT, Copyright 2022 Collabora, Ltd.) | GPL-3.0-or-later | `runtime/third_party/eglantine/` (with a local guarded-offset proof adaptation), `tools/dkb_lower_test.cpp`; the reason DKB Recomp is GPL-3.0-or-later |
 | TotK Recomp, the base of this repository (fork at 0.2.8) | https://github.com/valentderah/totk-pc-recomp @ `f469c5a`, Copyright (c) 2026 Valiantsin Dzerakh | MIT (`LICENSE-MIT`) | every file that came from it, with the rows below for what TotK Recomp itself took from others |
 | MacNativeGames extraction scripts and verification hashes | https://github.com/ly05010419/MacNativeGames @ `b75be8cfa704df3701e86130c8ced268e79d6b11`, Copyright (c) 2026 MacNativeGames contributors | MIT | `tools/vendor/macnativegames/` (unmodified), `tools/data/expected-v*.json` |
 | LAS Recomp lifter, code generator, FP/SIMD lowering, CPU headers and differential tests | https://github.com/peiikai/LASRecomp @ `da35b83a9611d046a9a681aae668d7085954d37f`, Copyright (c) 2026 Peiikai | MIT | `recomp/lifter.py`, `recomp/simd_c.py`, `recomp/nso.py`, `recomp/gen.py`, `recomp/module.py`, `tests/jumptables_check.py`, `runtime/cpu.h`, `runtime/simd.h`, `runtime/simd_fp.h`, `tests/diff/` |
@@ -39,6 +39,19 @@ Code copied or adapted from another project is listed here with its source, the 
 | AMD FidelityFX Super Resolution 1.0 (`ffx_a.h`, `ffx_fsr1.h`, unmodified; licence text in `runtime/shaders/ffx/LICENSE.txt`) | https://github.com/GPUOpen-Effects/FidelityFX-FSR @ `a21ffb8f6c13233ba336352bdff293894c706575`, Copyright (c) 2021 Advanced Micro Devices, Inc. | MIT | `runtime/shaders/ffx/`, `runtime/shaders/fsr_easu.comp`, `runtime/shaders/fsr_rcas.comp` (compiled into `runtime/fsr_easu_spv.h`, `runtime/fsr_rcas_spv.h`) |
 | AMD Display Library (ADL) declarations: `AdapterInfo`, `ADLSingleSensorData`, `ADLPMLogDataOutput`, the `ADL_PMLOG_*` sensor numbers and the `ADL2_*` function signatures | https://github.com/GPUOpen-LibrariesAndSDKs/display-library @ `84c881cb2136f04287eb3af12de00a9e2867aa9e` (`include/adl_structures.h`, `include/adl_defines.h`, `include/adl_sdk.h`), Copyright (c) 2016 - 2022 Advanced Micro Devices, Inc. | MIT | `runtime/perfmon.c` |
 | Zstandard 1.5.7 (MSYS2 `mingw-w64-ucrt-x86_64-zstd`), static link | https://github.com/facebook/zstd, Copyright (c) Meta Platforms, Inc. and affiliates | BSD-3-Clause | `runtime/resolution.c` (the HeapDef table), `runtime/ov_zstd.c` (the game's zstd frames decoded on the host) |
+
+
+## Isolated task/mesh shader compiler research
+
+These sources are used only by the offline experiment under ignored `build/oot-fix/mesh-compiler/`; this experiment is not linked into or distributed with the game runtime. Download hashes come from the pinned upstream `cpmfile.json`; source licence files remain beside each extracted dependency.
+
+| Component | Source and version | License | Used in |
+|---|---|---|---|
+| Eglantine IR, Maxwell frontend and SPIR-V backend | https://github.com/zortos293/Lichii @ `724aede4ea51fae8224cdd02549cdbdf7ceecd25`, with the repository's local Ampere lowering headers | GPL-3.0-or-later; legacy files GPL-2.0-or-later | Offline shader compiler; instruction layout follows `GenericEnvironment::LowerNativeCode` |
+| fmt | https://github.com/fmtlib/fmt, `12.1.0` | MIT | Offline compiler formatting |
+| Sirit | https://github.com/eden-emulator/sirit, `v1.0.5` | BSD-3-Clause in the compiled source/header notices | Offline SPIR-V construction |
+| SPIR-V Headers | https://github.com/KhronosGroup/SPIRV-Headers, `vulkan-sdk-1.4.341.0` | MIT | Offline SPIR-V declarations |
+| Boost headers | https://github.com/eden-emulator/ext-boost, `1.92.0` | BSL-1.0 | Offline compiler containers |
 
 ## Compiler runtime in a source build
 

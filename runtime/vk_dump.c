@@ -23,6 +23,9 @@
 // TOTK_DUMP_UBO=1: each listed pipeline also prints the first 16 vec4 of its user uniform blocks (c3 and up), read from
 // guest memory when the entry is listed. A block the submission rewrites with UpdateUniformBuffer shows its value from
 // before the submission (vk_exec_draw.c upd_note).
+// TOTK_DUMP_UBO_ROWS=<n>: number of vec4 rows when UBO logging is enabled (default 16, capped at 1024).
+// TOTK_DUMP_RAW_HDR=1 also retains raw float/packed-HDR/depth targets, including 3D volumes in z/y/x order. PNGs arrange
+// volume slices side by side and quantize them, so they cannot validate a fog integration numerically.
 // TOTK_DUMP_SKIP_RUNS=1: a render pass with the same targets as the render pass before it is logged but not copied
 // (the terrain decals draw one pass each into the G-buffer and would use up both caps).
 // TOTK_DUMP_TRIGGER=<file> waits until that file exists, then captures the next frame. This
@@ -53,9 +56,11 @@ static const char *trigger_path;
 static int waiting_trigger;
 static char dir[400], base_dir[400];   // base_dir: TOTK_DUMP_DIR; dir: where the current capture goes
 static int captures;                   // TOTK_DUMP_TRIGGER captures written; the second and later go to capture-<n>
-static FILE *passes_f, *images_f;
+static FILE *passes_f, *images_f, *commands_f;
+static unsigned command_seq;
 static int seq, finished, copied;      // copied: passes and dispatches of the dump frame whose images were copied
 static int skip_runs, dump_ubo;        // TOTK_DUMP_SKIP_RUNS, TOTK_DUMP_UBO
+static unsigned dump_ubo_rows = 16;
 static uint32_t want_tex[16][2];       // TOTK_DUMP_TEX: slot id and 0, or width and height
 static int nwant_tex;
 static uint64_t last_targets;          // targets_sig of the last render pass; 0 after a dispatch
@@ -226,8 +231,8 @@ static uint8_t u8(float x) { return x > 0 ? x < 1 ? (uint8_t)(x * 255.f + .5f) :
 static void write_images(const Job *j) {
     uint32_t pw = j->w * j->d, ph = j->h;
     uint64_t n = (uint64_t)pw * ph;
-    if (getenv("TOTK_DUMP_RAW_HDR") && j->d == 1 &&
-        (j->f->kind == K_RG11B10 || j->f->kind == K_E5)) {
+    if (getenv("TOTK_DUMP_RAW_HDR") &&
+        (j->f->kind == K_RG11B10 || j->f->kind == K_E5 || j->f->kind == K_FLOAT || j->f->kind == K_D32F)) {
         char path[600];
         snprintf(path, sizeof path, "%s/%s.raw", dir, j->name);
         FILE *raw = fopen(path, "wb");
@@ -470,6 +475,90 @@ static int active(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
     return !finished && (f == dump_frame || (log_from && f >= log_from && f < dump_frame));
 }
+// Commands are a separate log so aggregate pass parsing and pass numbering stay unchanged.
+// The entry records existing replay state only: it must not resolve targets, wait for GPU work,
+// or re-read counter memory, any of which could change the conditional-render timing being measured.
+void vk_dump_replay_note(VkExec *ex, const char *fmt, ...) {
+    plat_mutex_lock(&rec_lock);
+    if (!active()) goto out;
+    if (!commands_f) {
+        char path[600];
+        snprintf(path, sizeof path, "%s/commands.txt", dir);
+        commands_f = fopen(path, "w");
+        if (!commands_f) rt_fatal("vk_dump: cannot write %s", path);
+        command_seq = 0;
+    }
+    if (command_seq >= 100000) {
+        if (command_seq == 100000) fputs("command log truncated at 100000 entries\n", commands_f), command_seq++;
+        goto out;
+    }
+    fprintf(commands_f, "%u pass-next=%d fence=%llu prog=%llu disabled=%d cond=%#llx/%d "
+            "color0=%#llx depth=%#llx vs-c4=%#llx vs-c5=%#llx fs-c6=%#llx tex0=%#llx: ",
+            command_seq++, seq, (unsigned long long)ex->fence,
+            (unsigned long long)(ex->prog ? ex->prog->serial : 0), ex->render_disabled,
+            (unsigned long long)(ex->has_render_cond ? ex->render_cond.addr : 0),
+            ex->has_render_cond ? ex->render_cond.mode : -1,
+            (unsigned long long)(uintptr_t)(ex->rt.n > 0 && ex->rt.color[0] ? ex->rt.color[0]->mem : NULL),
+            (unsigned long long)(uintptr_t)(ex->rt.depth ? ex->rt.depth->mem : NULL),
+            (unsigned long long)ex->ubo[0][4].addr, (unsigned long long)ex->ubo[0][5].addr,
+            (unsigned long long)ex->ubo[1][6].addr, (unsigned long long)ex->tex[1][0]);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(commands_f, fmt, ap);
+    va_end(ap);
+    fputc('\n', commands_f);
+out:
+    plat_mutex_unlock(&rec_lock);
+}
+
+void vk_dump_replay_op(VkExec *ex, uint32_t op, const void *payload) {
+    switch (op) {
+    case OP_CLEAR_DS: {
+        const p_clear_ds *p = payload;
+        vk_dump_replay_note(ex, "clear-ds depth=%g depth-mask=%d stencil=%d stencil-mask=%#x",
+                            p->depth, p->depth_mask, p->stencil, p->stencil_mask);
+        break;
+    }
+    case OP_CLEAR_COLOR:
+        vk_dump_replay_note(ex, "clear-color");
+        break;
+    case OP_RENDER_ENABLE:
+        vk_dump_replay_note(ex, "render-enable value=%d", ((const p_flag *)payload)->value);
+        break;
+    case OP_REPORT_COUNTER: {
+        const p_report_counter *p = payload;
+        vk_dump_replay_note(ex, "report-counter addr=%#llx type=%llu", (unsigned long long)p->addr,
+                            (unsigned long long)p->type);
+        break;
+    }
+    case OP_CLEAR_BUF: {
+        const p_clear_buf *p = payload;
+        vk_dump_replay_note(ex, "clear-buffer addr=%#llx size=%#llx value=%#x", (unsigned long long)p->addr,
+                            (unsigned long long)p->size, p->value);
+        break;
+    }
+    case OP_DRAW: {
+        const p_draw *p = payload;
+        vk_dump_replay_note(ex, "draw prim=%d first=%d count=%d instances=%d base-instance=%d",
+                            p->prim, p->first, p->count, p->instances, p->base_instance);
+        break;
+    }
+    case OP_DRAW_IDX: {
+        const p_draw_idx *p = payload;
+        vk_dump_replay_note(ex, "draw-indexed prim=%d count=%d ibuf=%#llx base-vertex=%d instances=%d base-instance=%d",
+                            p->prim, p->count, (unsigned long long)p->ibuf, p->base_vertex, p->instances, p->base_instance);
+        break;
+    }
+    case OP_DRAW_IDX_IND:
+        vk_dump_replay_note(ex, "draw-indexed-indirect");
+        break;
+    case OP_DRAW_MESH:
+        vk_dump_replay_note(ex, "draw-mesh");
+        break;
+    default: break;
+    }
+}
+
 static uint64_t frame_now(void) { return __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1; }
 
 void vk_dump_upscale(VkExec *ex, VkImage image, VkFormat format, uint32_t width, uint32_t height, const char *kind) {
@@ -666,7 +755,7 @@ static void describe_bindings(Str *b, const VkExec *ex, const VkPipeInfo *info) 
             if (u->addr && vk_mem_resolve(u->addr, 1, &ms)) {
                 uint64_t n = u->size && u->size < ms.avail ? u->size : ms.avail;
                 const float *f = (const float *)(uintptr_t)u->addr;
-                for (uint64_t k = 0; k < 16 && (k + 1) * 16 <= n; k++)
+                for (uint64_t k = 0; k < dump_ubo_rows && (k + 1) * 16 <= n; k++)
                     sp(b, "%s[%llu] %g %g %g %g", k % 4 ? " " : "\n      ", (unsigned long long)k, f[4 * k], f[4 * k + 1],
                        f[4 * k + 2], f[4 * k + 3]);
             } else {
@@ -778,6 +867,8 @@ void vk_dump_draw_skip(VkExec *ex, const char *reason) {
         int raw = ctl && code && gfx_shader_is_nvn2(ctl);
         uint64_t hash = raw ? gfx_shader_nvn2_hash(ctl, code) : nvn2_origin(code);
         sp(&b, " stage[%u]=%016llx%s", i, (unsigned long long)hash, raw ? "(unlowered)" : "");
+        uint32_t kind = nvn2_native_kind(ctl, code);
+        if (kind != UINT32_MAX) sp(&b, "(native-kind=%u)", kind);
     }
     skipped[nskipped].serial = serial;
     skipped[nskipped].reason = reason;
@@ -788,7 +879,7 @@ out:
 }
 
 // OP_DRAW_MESH: the replay does not draw NVN 2 mesh tasks yet. Each distinct program is logged once with its raw
-// stage hashes, the call's raw arguments and the pass's targets, so a run shows which passes lose mesh geometry and
+// stage hashes, the recorded draw arguments and the pass's targets, so a run shows which passes lose mesh geometry and
 // which task/mesh programs (their native hashes, as in the lowering failures) they need. During an armed frame capture
 // the draw is also listed with the pass's skipped draws.
 void vk_dump_mesh(VkExec *ex, const void *payload) {
@@ -807,15 +898,19 @@ void vk_dump_mesh(VkExec *ex, const void *payload) {
         char targets[512] = "";
         vk_exec_targets_describe(ex, targets, sizeof targets);
         Str b = {0};
-        sp(&b, "mesh draw not replayed: prog %llu %s args %#llx %#llx %#llx caller %#llx;", (unsigned long long)serial,
-           m->indirect ? "indirect" : "direct", (unsigned long long)m->arg[0], (unsigned long long)m->arg[1],
-           (unsigned long long)m->arg[2], (unsigned long long)m->caller);
+        sp(&b, "mesh draw not replayed: prog %llu %s", (unsigned long long)serial,
+           m->indirect ? "indirect" : "direct");
+        if (m->indirect) sp(&b, " argument_buffer=%#llx", (unsigned long long)m->arg[0]);
+        else sp(&b, " first_task=%llu task_count=%llu", (unsigned long long)m->arg[0], (unsigned long long)m->arg[1]);
+        sp(&b, " caller %#llx;", (unsigned long long)m->caller);
         for (uint32_t k = 0; ex->prog && k < ex->prog->nstage && k < 6; k++) {
             const uint8_t *ctl = ex->prog->sd[k].control;
             const uint8_t *code = (const uint8_t *)(uintptr_t)ex->prog->sd[k].data;
             int raw = ctl && code && gfx_shader_is_nvn2(ctl);
             uint64_t hash = raw ? gfx_shader_nvn2_hash(ctl, code) : nvn2_origin(code);
             sp(&b, " stage[%u]=%016llx%s", k, (unsigned long long)hash, raw ? "(unlowered)" : "");
+            uint32_t kind = nvn2_native_kind(ctl, code);
+            if (kind != UINT32_MAX) sp(&b, "(native-kind=%u)", kind);
         }
         rt_log("vk: %s targets: %s", b.s ? b.s : "", targets);
         free(b.s);
@@ -836,7 +931,12 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
             else pass_fs_over++;
         }
     }
+    // Depth state is dynamic and can differ between draws sharing a pipeline and resource bindings.
     uint64_t th = bindings_hash(ex, info);
+    th = (th ^ s->ds.dt) * 0x100000001b3ull;
+    th = (th ^ s->ds.dw) * 0x100000001b3ull;
+    th = (th ^ s->ds.df) * 0x100000001b3ull;
+    th = (th ^ s->ds.st) * 0x100000001b3ull;
     for (int i = 0; i < nents; i++)
         if (ents[i].p == p && ents[i].th == th) {
             ents[i].draws++;
@@ -853,7 +953,8 @@ void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeIn
         uint64_t o = nvn2_origin((const uint8_t *)(uintptr_t)ex->prog->sd[k].data);
         if (o) sp(&b, " nvn2 %016llx", (unsigned long long)o);
     }
-    sp(&b, "\n");
+    sp(&b, " | depth test %u write %u func %u stencil %u\n",
+       (unsigned)s->ds.dt, (unsigned)s->ds.dw, (unsigned)s->ds.df, (unsigned)s->ds.st);
     describe_bindings(&b, ex, info);
     ents[nents++] = (Ent){p, th, 1, b.s};
 out:
@@ -1061,6 +1162,11 @@ void vk_dump_init(void) {
     skip_runs = sr && *sr && *sr != '0';
     const char *du = cfg_get("TOTK_DUMP_UBO");
     dump_ubo = du && *du && *du != '0';
+    const char *rows = getenv("TOTK_DUMP_UBO_ROWS");
+    if (rows && *rows) {
+        unsigned long value = strtoul(rows, NULL, 10);
+        if (value) dump_ubo_rows = value > 1024 ? 1024 : (unsigned)value;
+    }
     const char *wt = cfg_get("TOTK_DUMP_TEX");
     for (char *q = (char *)wt; q && *q && nwant_tex < 16; q += *q == ',') {
         uint32_t *w = want_tex[nwant_tex++];
@@ -1133,6 +1239,7 @@ void vk_dump_present(uint64_t frame) {
     plat_mutex_unlock(&img_lock);
     fclose(passes_f);
     passes_f = NULL;
+    if (commands_f) fclose(commands_f), commands_f = NULL;
     rt_log("vk_dump: frame %llu: %d passes and dispatches, about %llu MB of PNGs in %s", (unsigned long long)frame, seq,
            (unsigned long long)(png_bytes >> 20), dir);
     if (trigger_path && *trigger_path) {

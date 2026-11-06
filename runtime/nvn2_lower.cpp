@@ -22,7 +22,13 @@ constexpr size_t kC0Layout = 0x860;  // "DKC1" + compute parameter layout (gfx_s
 constexpr uint64_t kMaxwellNop = 0x50b0000000070f00ull;
 constexpr uint64_t kMaxwellExit = 0xe30000000007000full;
 
-struct Lowered { std::vector<uint8_t> control; std::vector<uint64_t> code; uint64_t origin; bool tensor = false; };
+struct Lowered {
+    std::vector<uint8_t> control;
+    std::vector<uint64_t> code;
+    uint64_t origin;
+    uint32_t native_kind;
+    bool tensor = false;
+};
 std::mutex lock;
 // Keyed by content, not by address: a game frees program memory and loads other shaders at the same place (a scene
 // change), and an address key handed those the old lowering. The key is gfx_shader_nvn2_hash (the dump name).
@@ -34,6 +40,19 @@ std::unordered_map<const uint8_t *, uint64_t> origins;
 // Lowered code buffers of stages that use the tensor cores (HMMA, LDSM). The game's DLSS-style upscaler is a chain of
 // them; without tensor cores each HMMA expands to dozens of shuffles, so one such stage is tens of MB of SPIR-V.
 std::unordered_set<const uint8_t *> tensor_stages;
+uint32_t native_control_kind(const uint8_t *control) {
+    uint32_t magic, version;
+    std::memcpy(&magic, control, sizeof magic);
+    std::memcpy(&version, control + 4, sizeof version);
+    if (magic != 0x98761234 || version != 0xc9) return UINT32_MAX;
+    uint32_t size;
+    std::memcpy(&size, control + 0x30, sizeof size);
+    if (size && size < 0x58) return UINT32_MAX;
+    uint16_t kind;
+    std::memcpy(&kind, control + 0x56, sizeof kind);
+    return kind;
+}
+
 bool uses_tensor(const std::vector<Shader::Ampere::Instruction> &native) {
     for (const auto &insn : native) {
         const uint32_t op = insn.Bits(0, 12);
@@ -184,6 +203,8 @@ extern "C" int nvn2_lower(const uint8_t *control, const uint8_t *code, const uin
     auto [it, fresh] = cache.try_emplace(key, nullptr);
     if (fresh && (it->second = lower(control, code))) {
         it->second->origin = key;
+        // Native control distinguishes Task (6) / Mesh (7), even when the SPH type is also used by a vertex stage.
+        it->second->native_kind = native_control_kind(control);
         origins.emplace(reinterpret_cast<const uint8_t *>(it->second->code.data()), key);
         if (it->second->tensor) tensor_stages.insert(reinterpret_cast<const uint8_t *>(it->second->code.data()));
     }
@@ -199,6 +220,20 @@ extern "C" uint64_t nvn2_origin(const uint8_t *code) {
     std::lock_guard<std::mutex> g(lock);
     auto it = origins.find(code);
     return it == origins.end() ? 0 : it->second;
+}
+
+// Preserve the native stage discriminator for diagnostics after replacing the control block with its legacy shape.
+// Program-array indices are not stage slots, and SPH types alone cannot distinguish task/mesh programs.
+extern "C" uint32_t nvn2_native_kind(const uint8_t *control, const uint8_t *code) {
+    if (control) {
+        const uint32_t kind = native_control_kind(control);
+        if (kind != UINT32_MAX) return kind;
+    }
+    std::lock_guard<std::mutex> g(lock);
+    const auto origin = origins.find(code);
+    if (origin == origins.end()) return UINT32_MAX;
+    const auto found = cache.find(origin->second);
+    return found != cache.end() && found->second ? found->second->native_kind : UINT32_MAX;
 }
 
 // 1 when a lowered code buffer is a stage that uses the tensor cores (HMMA/LDSM).

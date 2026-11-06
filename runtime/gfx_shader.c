@@ -2343,46 +2343,77 @@ const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words) {
 }
 
 // DKB_FS_OVERRIDE_HASH=<original SPIR-V FNV hash>, DKB_FS_OVERRIDE_FILE=<local SPIR-V>.
+// DKB_CS_OVERRIDE_HASH / DKB_CS_OVERRIDE_FILE apply the same capture probe to compute stages.
 // The diagnostic rereads the file every 60 frames so numerical probes need no game restart. Probes must preserve
 // the original declarations verbatim, appending only private tracing declarations before the first function.
+// An optional <file>.hash sidecar selects another original SPIR-V FNV hash at the same interval. Changing the target
+// restores the previous shader before selecting the new base; removing the sidecar returns to the environment hash.
 // Variants remain resident because in-flight commands and cached pipelines can still reference them. None enter
 // the normal shader cache, and removing the file restores the original shader.
-const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame) {
-    static int initialized;
-    static const char *path;
-    static uint64_t wanted, checked = UINT64_MAX;
-    static const GfxShader *base, *current;
-    static GfxShader *variants[32];
-    static unsigned nvariants;
-    if (!initialized) {
-        const char *hash = getenv("DKB_FS_OVERRIDE_HASH");
-        path = getenv("DKB_FS_OVERRIDE_FILE");
-        wanted = hash ? strtoull(hash, NULL, 16) : 0;
-        initialized = 1;
+typedef struct {
+    int initialized;
+    const char *path;
+    uint64_t configured, wanted, checked, target_checked;
+    const GfxShader *base, *current;
+    GfxShader *variants[32];
+    unsigned nvariants;
+} ShaderProbe;
+
+static const GfxShader *shader_debug_override(const GfxShader *s, uint64_t frame, ShaderProbe *probe,
+                                              int stage, const char *hash_env, const char *file_env) {
+    if (!probe->initialized) {
+        const char *hash = getenv(hash_env);
+        probe->path = getenv(file_env);
+        probe->configured = probe->wanted = hash ? strtoull(hash, NULL, 16) : 0;
+        probe->checked = probe->target_checked = UINT64_MAX;
+        probe->initialized = 1;
     }
-    if (!path || !*path || !wanted || !s || s->stage != GFX_STAGE_FS) return s;
-    if (!base) {
+    if (!probe->path || !*probe->path || !s || s->stage != stage) return s;
+    if (probe->target_checked == UINT64_MAX || frame >= probe->target_checked + 60) {
+        char sidecar[PATH_CAP + 80];
+        int length = snprintf(sidecar, sizeof sidecar, "%s.hash", probe->path);
+        FILE *f = length > 0 && (size_t)length < sizeof sidecar ? fopen(sidecar, "rb") : NULL;
+        char text[80];
+        uint64_t next = probe->configured;
+        if (f) {
+            if (fgets(text, sizeof text, f)) {
+                char *end;
+                uint64_t parsed = strtoull(text, &end, 16);
+                if (end != text && parsed) next = parsed;
+            }
+            fclose(f);
+        }
+        if (next != probe->wanted) {
+            probe->wanted = next;
+            probe->base = probe->current = NULL;
+            probe->checked = UINT64_MAX;
+            rt_log("gfx_shader: shader probe target changed to %016llx", (unsigned long long)probe->wanted);
+        }
+        probe->target_checked = frame;
+    }
+    if (!probe->wanted) return s;
+    if (!probe->base) {
         uint64_t h = 0xcbf29ce484222325ull;
         const uint8_t *bytes = (const uint8_t *)s->spirv;
         for (uint64_t i = 0; i < s->words * 4; i++) h = (h ^ bytes[i]) * 0x100000001b3ull;
-        if (h != wanted) return s;
-        base = s;
+        if (h != probe->wanted) return s;
+        probe->base = s;
     }
-    if (s != base) return s;
-    if (checked != UINT64_MAX && frame < checked + 60) return current ? current : s;
-    checked = frame;
+    if (s != probe->base) return s;
+    if (probe->checked != UINT64_MAX && frame < probe->checked + 60) return probe->current ? probe->current : s;
+    probe->checked = frame;
     size_t size = 0;
-    uint32_t *words = (uint32_t *)read_file(path, &size);
+    uint32_t *words = (uint32_t *)read_file(probe->path, &size);
     if (!words) {
-        if (current) rt_log("gfx_shader: fragment probe removed; original shader restored");
-        current = NULL;
+        if (probe->current) rt_log("gfx_shader: shader probe removed; original shader restored");
+        probe->current = NULL;
         return s;
     }
     int valid = !(size & 3) && gfx_probe_declarations(s->spirv, s->words, words, size / 4);
     if (!valid) {
         free(words);
-        rt_log("gfx_shader: fragment probe rejected: declarations or module framing changed");
-        return current ? current : s;
+        rt_log("gfx_shader: shader probe rejected: declarations or module framing changed");
+        return probe->current ? probe->current : s;
     }
     Sha256 hash;
     uint8_t key[32];
@@ -2390,16 +2421,16 @@ const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame) {
     sha256_update(&hash, s->key, 32);
     sha256_update(&hash, words, size);
     sha256_final(&hash, key);
-    for (unsigned i = 0; i < nvariants; i++) {
-        if (!memcmp(variants[i]->key, key, 32)) {
+    for (unsigned i = 0; i < probe->nvariants; i++) {
+        if (!memcmp(probe->variants[i]->key, key, 32)) {
             free(words);
-            return current = variants[i];
+            return probe->current = probe->variants[i];
         }
     }
-    if (nvariants == sizeof variants / sizeof *variants) {
+    if (probe->nvariants == sizeof probe->variants / sizeof *probe->variants) {
         free(words);
-        rt_log("gfx_shader: fragment probe limit reached (32 variants)");
-        return current ? current : s;
+        rt_log("gfx_shader: shader probe limit reached (32 probe->variants)");
+        return probe->current ? probe->current : s;
     }
     GfxShader *variant = malloc(sizeof *variant);
     if (!variant) { free(words); return s; }
@@ -2408,10 +2439,20 @@ const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame) {
     variant->spirv = words;
     variant->words = size / 4;
     memcpy(variant->key, key, 32);
-    variants[nvariants++] = variant;
-    current = variant;
-    rt_log("gfx_shader: fragment probe variant %u loaded (%zu bytes)", nvariants, size);
-    return current;
+    probe->variants[probe->nvariants++] = variant;
+    probe->current = variant;
+    rt_log("gfx_shader: shader probe variant %u loaded (%zu bytes)", probe->nvariants, size);
+    return probe->current;
+}
+
+const GfxShader *gfx_shader_debug_override(const GfxShader *s, uint64_t frame) {
+    static ShaderProbe probe;
+    return shader_debug_override(s, frame, &probe, GFX_STAGE_FS, "DKB_FS_OVERRIDE_HASH", "DKB_FS_OVERRIDE_FILE");
+}
+
+const GfxShader *gfx_shader_debug_compute_override(const GfxShader *s, uint64_t frame) {
+    static ShaderProbe probe;
+    return shader_debug_override(s, frame, &probe, GFX_STAGE_CS, "DKB_CS_OVERRIDE_HASH", "DKB_CS_OVERRIDE_FILE");
 }
 
 int gfx_shader_stage(const GfxShader *s) { return s->stage; }

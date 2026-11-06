@@ -153,6 +153,9 @@ void vk_exec_targets_describe(VkExec *ex, char *buf, size_t cap);
 typedef struct {
     uint64_t passes, draws_seen, draws, clears, copies, dispatches, submits;
     uint64_t mesh_draws;   // NVN 2 mesh-task draws recorded but not replayed (OP_DRAW_MESH)
+    uint64_t cond_evals, cond_pending, cond_off, cond_skips;   // OP_RENDER_COND evaluated; rendered because a
+                                                              // samples-passed count was not done; disabled
+                                                              // rendering; draws and dispatches it skipped
     uint64_t fb_draws, fb_barriers, fb_restarts, fb_layouts;   // feedback loops: draws sampling a written target of
                                                                // their pass, in-pass barriers, pass restarts, layout
                                                                // transitions
@@ -169,6 +172,9 @@ extern int vk_dump_armed;
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
+// Capture-only replay order, including skipped conditional operations. No GPU reads or state changes.
+void vk_dump_replay_note(VkExec *ex, const char *fmt, ...);
+void vk_dump_replay_op(VkExec *ex, uint32_t op, const void *payload);
 void vk_dump_draw_skip(VkExec *ex, const char *reason);   // failed or pending draws, grouped per pass and program
 extern int vk_dump_skip_fs_on;   // DKB_SKIP_FS_FILE set: vk_dump_skip_fs runs for every draw
 int vk_dump_skip_fs(const GfxShader *fs);   // 1: leave this draw out (its fragment shader is listed)

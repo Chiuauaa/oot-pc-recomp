@@ -52,6 +52,71 @@ static u64 copy(u32 guard, u32 dest, u32 source) {
     return 0x5c98000000000000ULL | (u64{guard} << 16) | dest | (15ULL << 39) | (u64{source} << 20);
 }
 int main() {
+    {
+        auto shift = insn(0x219, 7, 228, 255);
+        field(shift, 32, 8, 228);
+        shift.words[2] = 0x00011e00 | 25;
+        auto pressure = Shader::Ampere::PrepareRegisterPressure(shift, 216);
+        require(pressure.valid, "register SHF supports high-register shadowing");
+        require(pressure.instruction.Bits(16,8) == pressure.instruction.Bits(32,8) &&
+                    pressure.instruction.Bits(16,8) < 216,
+                "SHF keeps aliased destination and shift-count GPR together");
+        require(pressure.instruction.Bits(24,8) == 255 && pressure.instruction.Bits(64,8) == 25,
+                "SHF preserves RZ and an independent low-numbered high word");
+        require(pressure.prefix.size() == 8 && pressure.suffix.size() == 8,
+                "SHF preserves and restores the one borrowed register quartet");
+        auto uniform = insn(0xc08, 7, 20, 255);
+        field(uniform, 91, 1, 1); field(uniform, 87, 4, 7);
+        require(bool(LowerToMaxwell(std::array{uniform, shift, exit_insn()})),
+                "SHF with a high aliased shift count lowers beside a uniform-register operation");
+        shift = insn(0x219, 3, 228, 232);
+        field(shift, 32, 8, 236); shift.words[2] = 0x00001200 | 240;
+        pressure = Shader::Ampere::PrepareRegisterPressure(shift, 216);
+        require(pressure.valid, "four-quartet SHF register pressure is supported");
+        for (u32 bit : {16U,24U,32U,64U})
+            require(pressure.instruction.Bits(bit,8) < 216, "each high SHF operand is shadowed");
+        require(bool(LowerToMaxwell(std::array{uniform, shift, exit_insn()})),
+                "predicated double-word SHF lowers with all four high GPR operands");
+        shift.words[2] |= 0x80000000;
+        require(!LowerToMaxwell(std::array{uniform, shift, exit_insn()}),
+                "register-pressure support does not accept an unsupported SHF mode");
+    }
+    for (u32 guard : {7U, 3U, 11U}) {
+        auto select = insn(0xc08, guard, 20, 18);
+        field(select, 91, 1, 1); // The native uniform-B encoding enables its UR operand here.
+        field(select, 32, 6, 10); field(select, 87, 3, 4); field(select, 90, 1, 1);
+        auto lowered = LowerToMaxwell(std::array{select, exit_insn()});
+        require(bool(lowered), "FSEL with uniform B lowers");
+        const u64 expected = 0x5ca0000000000014ULL | (u64{guard} << 16) | (18ULL << 8) |
+                             (226ULL << 20) | (4ULL << 39) | (1ULL << 42);
+        require(lowered.instructions[0] == expected,
+                "FSEL preserves execution guard and selector, reading UR10's independent mirror");
+        field(select, 32, 6, 63);
+        lowered = LowerToMaxwell(std::array{select, exit_insn()});
+        require(bool(lowered) && ((lowered.instructions[0] >> 20) & 255) == 255,
+                "FSEL reads URZ as zero");
+        field(select, 32, 6, 10); field(select, 62, 1, 1); field(select, 63, 1, 1);
+        lowered = LowerToMaxwell(std::array{select, exit_insn()});
+        require(bool(lowered), "FSEL applies floating absolute/negate modifiers to uniform B");
+        require(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
+                    return (word & 0xffff000000000000ULL) == 0x5ca0000000000000ULL;
+                }), "modified uniform FSEL ends in bit-preserving Maxwell SEL");
+    }
+    {
+        auto select = insn(0xc08, 7, 224, 228);
+        field(select, 91, 1, 1);
+        field(select, 32, 6, 10); field(select, 87, 4, 7);
+        const auto pressure = Shader::Ampere::PrepareRegisterPressure(select, 216);
+        require(pressure.valid, "uniform FSEL supports high GPR shadowing");
+        require(pressure.instruction.Bits(16,8) < 216 && pressure.instruction.Bits(24,8) < 216,
+                "uniform FSEL keeps high GPR operands separate from the uniform bank");
+        require(pressure.instruction.words[1] == select.words[1], "uniform FSEL does not shadow its UR index");
+        require(bool(LowerToMaxwell(std::array{select, exit_insn()})),
+                "uniform FSEL with overlapping high GPRs lowers after shadowing");
+        field(select, 16, 8, 20); field(select, 24, 8, 18); field(select, 32, 6, 28);
+        require(bool(LowerToMaxwell(std::array{select, exit_insn()})),
+                "uniform FSEL reserves an additional bank for UR28");
+    }
     for (u32 opcode : {0x809U, 0x803U, 0xb82U}) {
         auto high = insn(opcode, 7, 220, 224);
         high.words[1] = opcode == 0x803 ? 1 : 0x3727c5ac;
@@ -87,8 +152,22 @@ int main() {
             require((ldc >> 8 & 255) != 255, "indexed ULDC retains a nonzero index register");
             const u32 mapped_guard = guard == 7 ? 7 : (guard & 8) | (6 - (guard & 7));
             require((ldc >> 16 & 15) == mapped_guard, "indexed ULDC uses the mapped uniform predicate");
+            // The indexed form's immediate is signed (nvdisasm SM86 prints 0xffff as c[0x4][UR15+-0x1]), as is the
+            // Maxwell LDC offset added to the index (the translator's Ldc, Imm16ToSInt): 0x8000 is -0x8000 on both
+            // sides and is copied unchanged. Lichii f356d39b accepts it for the same reason.
             field(load, 38, 16, 0x8000);
-            require(!LowerToMaxwell(std::array{load, exit_insn()}), "unsigned offset outside signed Maxwell range is rejected");
+            auto negative = LowerToMaxwell(std::array{load, exit_insn()});
+            require(bool(negative), "indexed ULDC with a negative offset lowers");
+            const auto neg_ldc = std::find_if(negative.instructions.begin(), negative.instructions.end(),
+                                              [](u64 word) { return (word >> 52) == 0xef9; });
+            require(neg_ldc != negative.instructions.end() && (*neg_ldc >> 20 & 0xffff) == 0x8000,
+                    "indexed ULDC keeps its signed offset bits");
+            // The direct form's offset stays unsigned and limited to Maxwell's non-negative range.
+            auto direct = insn(0xab9, 7, 4, 255);
+            field(direct, 38, 16, 0x8000);
+            field(direct, 54, 5, 4);
+            direct.words[2] = width << 9;
+            require(!LowerToMaxwell(std::array{direct, exit_insn()}), "direct subword ULDC past 0x7fff is rejected");
         }
     }
     for (u32 guard : {1U, 7U, 9U}) {

@@ -821,18 +821,18 @@ NVN_API(nvnCommandBufferDispatchCompute) {
 NVN_API(nvnCommandBufferDispatchComputeIndirect) {
     *REC(cmd_of(c), OP_DISPATCH_IND, p_dispatch_ind) = (p_dispatch_ind){arg_x(c, 1), c->x[30]};
 }
-// void nvnCommandBufferDrawMeshTasks(NVNcommandBuffer *cmd, ...) and nvnCommandBufferDrawMeshTasksIndirect(
-// NVNcommandBuffer *cmd, ...) (NVN 2): recorded in command order with their raw arguments (p_draw_mesh), so the replay
-// can place each one in its pass and report the bound task/mesh program. They are not drawn yet. nvn2_mesh_note
+// NVN 2 DrawMeshTasks(cmd, first, count) and DrawMeshTasksIndirect(cmd, address): recorded in command order
+// (p_draw_mesh), so the replay can report their pass and bound task/mesh program. They are not drawn yet. nvn2_mesh_note
 // (nvn_api_nvn2.c) adds the OOT_MESH_LOG record-time log that the other mesh entry points share.
 void nvn2_mesh_note(const char *name, const Cpu *c);
 NVN_API(nvnCommandBufferDrawMeshTasks) {
     nvn2_mesh_note("DrawMeshTasks", c);
-    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) = (p_draw_mesh){{arg_x(c, 1), arg_x(c, 2), arg_x(c, 3)}, 0, 0, c->x[30]};
+    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) =
+        (p_draw_mesh){{(uint32_t)arg_x(c, 1), (uint32_t)arg_x(c, 2), 0}, 0, 0, c->x[30]};
 }
 NVN_API(nvnCommandBufferDrawMeshTasksIndirect) {
     nvn2_mesh_note("DrawMeshTasksIndirect", c);
-    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) = (p_draw_mesh){{arg_x(c, 1), arg_x(c, 2), arg_x(c, 3)}, 1, 0, c->x[30]};
+    *REC(cmd_of(c), OP_DRAW_MESH, p_draw_mesh) = (p_draw_mesh){{arg_x(c, 1), 0, 0}, 1, 0, c->x[30]};
 }
 // void nvnCommandBufferClearBuffer(NVNcommandBuffer *cmd, NVNbufferAddress addr, size_t size, uint32_t value)
 NVN_API(nvnCommandBufferClearBuffer) {

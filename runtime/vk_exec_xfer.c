@@ -114,11 +114,58 @@ static void counter_cb(void *arg) {
     free(w);
 }
 
-// Reports queued by the replay that the GPU has not finished. The condition of RENDER_COND reads a timestamp one as 0
-// and a samples-passed one as unknown.
-#define PENDING 256
-static struct { uint64_t addr, fence; int unknown; } pending[PENDING];
-static unsigned pending_head;
+// Reports queued by replay must remain known until their fence completes. A fixed report
+// ring loses still-pending sample queries in scenes with hundreds of reports per submission,
+// making conditional draws read stale guest counts. Keep the newest report per address in a
+// replay-owned hash table; discard completed entries only when rebuilding the table.
+typedef struct { uint64_t addr, fence; int unknown; } PendingCounter;
+static PendingCounter *pending;
+static size_t pending_cap, pending_used;
+
+static size_t pending_slot(uint64_t addr, size_t cap) {
+    return (size_t)(((addr >> 4) ^ (addr >> 32)) * UINT64_C(0x9e3779b97f4a7c15)) & (cap - 1);
+}
+
+static PendingCounter *pending_find(uint64_t addr) {
+    if (!pending_cap || !addr) return NULL;
+    size_t i = pending_slot(addr, pending_cap);
+    while (pending[i].addr && pending[i].addr != addr) i = (i + 1) & (pending_cap - 1);
+    return pending[i].addr ? &pending[i] : NULL;
+}
+
+static void pending_rehash(uint64_t done) {
+    size_t live = 0;
+    for (size_t i = 0; i < pending_cap; i++)
+        live += pending[i].addr != 0 && pending[i].fence > done;
+    size_t cap = pending_cap ? pending_cap : 512;
+    if (live + 1 > cap - cap / 4) {
+        if (cap > SIZE_MAX / 2) rt_fatal("vk: pending counter table too large");
+        cap *= 2;
+    }
+    PendingCounter *next = calloc(cap, sizeof *next);
+    if (!next) rt_fatal("vk: out of memory tracking pending counters");
+    for (size_t i = 0; i < pending_cap; i++) {
+        if (!pending[i].addr || pending[i].fence <= done) continue;
+        size_t j = pending_slot(pending[i].addr, cap);
+        while (next[j].addr) j = (j + 1) & (cap - 1);
+        next[j] = pending[i];
+    }
+    free(pending);
+    pending = next, pending_cap = cap, pending_used = live;
+}
+
+static void pending_note(uint64_t addr, uint64_t fence, int unknown, uint64_t done) {
+    PendingCounter *p = pending_find(addr);
+    if (p) {
+        *p = (PendingCounter){addr, fence, unknown};
+        return;
+    }
+    if (!pending_cap || pending_used + 1 > pending_cap - pending_cap / 4) pending_rehash(done);
+    size_t i = pending_slot(addr, pending_cap);
+    while (pending[i].addr) i = (i + 1) & (pending_cap - 1);
+    pending[i] = (PendingCounter){addr, fence, unknown};
+    pending_used++;
+}
 
 // ---- occlusion counts (samples passed)
 //
@@ -207,6 +254,8 @@ void vk_exec_oq_draw(VkExec *ex) {
 void vk_exec_oq_pass_end(VkExec *ex) { oq_close(ex); }
 
 void vk_exec_xfer_shutdown(void) {
+    free(pending);
+    pending = NULL, pending_cap = pending_used = 0;
     if (oq_state > 0) vkDestroyQueryPool(vk_ctx()->device, oq_pool, NULL);
     oq_pool = VK_NULL_HANDLE, oq_state = 0, oq_next = 0, oq_counting = oq_reported = oq_keep = 0, oq_open = -1;
     oq_nseg = 0, oq_lost = 0, oq_count = 0;
@@ -259,8 +308,18 @@ static void oq_segment(VkExec *ex, uint64_t addr, int reset) {
     vk_completion_add(ex->fence, oq_cb, s);
 }
 
+// The native SDK keeps type 1 for samples passed and type 16 for a timestamp release. A prior diagnostic treated
+// type 16 as samples; SDK CommandBufferReportCounter's semaphore packets disproved that interpretation.
+static int cond_mode(void);
+static int samples_type(uint64_t type, uint64_t addr) {
+    static uint32_t seen;
+    if (type < 32 && !(__atomic_fetch_or(&seen, 1u << type, __ATOMIC_RELAXED) & (1u << type)))
+        rt_log("vk: counter type %llu first reported or reset at %#llx", (unsigned long long)type, (unsigned long long)addr);
+    return type == NVN_COUNTER_TYPE_SAMPLES_PASSED;
+}
+
 static void reset_counter(VkExec *ex, const p_reset_counter *p) {
-    if (p->type != NVN_COUNTER_TYPE_SAMPLES_PASSED || !oq_ready()) return;
+    if (!samples_type(p->type, 0) || !oq_ready()) return;
     oq_segment(ex, 0, 1);
     oq_counting = 1, oq_reported = 0;
 }
@@ -284,8 +343,10 @@ static void signal_event(VkExec *ex, const p_signal_event *p) {
     vk_completion_add(ex->fence, event_cb, e);
 }
 
+static void cond_writer_note(uint64_t addr, int what);
 static void report_counter(VkExec *ex, const p_report_counter *p) {
-    int samples = p->type == NVN_COUNTER_TYPE_SAMPLES_PASSED && oq_ready();
+    cond_writer_note(p->addr, (int)p->type + 1);
+    int samples = samples_type(p->type, p->addr) && oq_ready();
     if (nvn_gpu_only(p->addr)) {   // CPU-invisible pool: no host memory behind it
         if (samples) oq_report(ex, 0);
         return;
@@ -301,7 +362,7 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
         *a = (CounterWrite){p->addr, ex->submitted_ticks};
         vk_completion_add(ex->fence, counter_cb, a);
     }
-    pending[pending_head++ % PENDING] = (typeof(pending[0])){p->addr, ex->fence, samples};
+    pending_note(p->addr, ex->fence, samples, vk_sync_fence_done());
 }
 
 // ---- conditional rendering
@@ -309,10 +370,8 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
 // 1: *v read, 0: not readable, 2: a samples-passed report not done yet (unknown)
 static int counter_word(uint64_t addr, uint64_t *v) {
     uint64_t done = vk_sync_fence_done();
-    for (unsigned k = 1; k <= PENDING; k++) {   // newest first: the last report to addr decides
-        unsigned i = (pending_head - k) % PENDING;
-        if (pending[i].addr == addr && pending[i].fence > done) return *v = 0, pending[i].unknown ? 2 : 1;
-    }
+    const PendingCounter *p = pending_find(addr);
+    if (p && p->fence > done) return *v = 0, p->unknown ? 2 : 1;
     VkMemSpan m;
     if (nvn_gpu_only(addr) || !vk_mem_resolve(addr, sizeof *v, &m)) return 0;
     memcpy(v, (const void *)(uintptr_t)addr, sizeof *v);
@@ -320,15 +379,104 @@ static int counter_word(uint64_t addr, uint64_t *v) {
     return 1;
 }
 
-static int cond_enabled(const p_render_cond *c) {
-    uint64_t x, y;
+// DKB_COND_PENDING_FILE=<file>: a diagnostic read again every 60 frames, so the choices can be compared in one session.
+// '1': a condition whose samples-passed count is not done yet disables rendering instead of enabling it. '2': every
+// condition enables rendering (occlusion culling off), to tell culled objects from missing ones. '4': read back the
+// first 48 distinct disabling/pending condition records in GPU command order, without changing their decisions.
+// This is a bounded, synchronous diagnostic; leave it off for timing. Mode 3 was a disproved counter-type experiment.
+// Anything else: the
+// normal rule. Each distinct pending condition, and the first conditions that disable rendering, are logged once.
+static int cond_mode(void) {
+    static const char *path;
+    static int init, mode;
+    static uint64_t read_frame;
+    if (!init) path = getenv("DKB_COND_PENDING_FILE"), init = 1;
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (path && *path && (!read_frame || frame >= read_frame + 60)) {
+        FILE *f = fopen(path, "rb");
+        int v = f ? fgetc(f) : EOF;
+        if (f) fclose(f);
+        int m = v == '1' ? 1 : v == '2' ? 2 : v == '4' ? 4 : 0;
+        if (m != mode)
+            rt_log("vk: DKB_COND_PENDING_FILE: %s", m == 1 ? "pending conditions skip" : m == 2 ? "every condition renders" : m == 4 ? "bounded GPU condition readback"
+                                                                                           : "normal conditions");
+        mode = m, read_frame = frame;
+    }
+    return mode;
+}
+
+// The last replayed writer of each counter address (report type + 1, or 'V' for a 4-byte ReportValue / ClearBuffer),
+// for cond_note: a condition whose counters nothing in the replay writes reads guest memory the GPU never updated.
+static struct { uint64_t addr; int what; } cond_writer[8192];
+static void cond_writer_note(uint64_t addr, int what) {
+    size_t i = (addr >> 4) & 8191;
+    for (unsigned n = 0; n < 8192 && cond_writer[i].addr && cond_writer[i].addr != addr; n++) i = (i + 1) & 8191;
+    cond_writer[i].addr = addr, cond_writer[i].what = what;
+}
+static const char *cond_writer_name(uint64_t addr, char *buf) {
+    size_t i = (addr >> 4) & 8191;
+    for (unsigned n = 0; n < 8192 && cond_writer[i].addr; n++, i = (i + 1) & 8191)
+        if (cond_writer[i].addr == addr) {
+            if (cond_writer[i].what == 'V') return "ReportValue/ClearBuffer";
+            return snprintf(buf, 32, "ReportCounter type %d", cond_writer[i].what - 1), buf;
+        }
+    return "nothing replayed";
+}
+
+static void cond_note(VkExec *ex, const p_render_cond *c, const char *what, uint64_t x, uint64_t y) {
+    static uint64_t seen[48];
+    static unsigned nseen;
+    unsigned i = 0;
+    while (i < nseen && seen[i] != c->addr) i++;
+    if (i < nseen || nseen == 48) return;
+    seen[nseen++] = c->addr;
+    char tg[512] = "";
+    vk_exec_targets_describe(ex, tg, sizeof tg);
+    char b0[32], b1[32];
+    rt_log("vk: conditional render at %#llx (mode %d, %s): counters %llu and %llu, written by %s and %s; pass targets: %s",
+           (unsigned long long)c->addr, c->mode, what, (unsigned long long)x, (unsigned long long)y,
+           cond_writer_name(c->addr, b0), cond_writer_name(c->addr + 16, b1), tg);
+}
+
+static int cond_enabled(VkExec *ex, const p_render_cond *c) {
+    uint64_t x = 0, y = 0;
     int rx = counter_word(c->addr, &x), ry = counter_word(c->addr + 16, &y);
+    if (vk_dump_armed)
+        vk_dump_replay_note(ex, "condition-input addr=%#llx mode=%d x=%#llx y=%#llx status=%d/%d done=%llu",
+                            (unsigned long long)c->addr, c->mode, (unsigned long long)x, (unsigned long long)y,
+                            rx, ry, (unsigned long long)vk_sync_fence_done());
     if (!rx || !ry) {
         warn_once(W_BUFFER, "conditional render counters at %#llx are not readable: rendering", (unsigned long long)c->addr);
         return 1;
     }
-    if (rx == 2 || ry == 2) return 1;   // a samples-passed count not done yet
-    return c->mode == 0 ? x == y : x != y;
+    int mode = cond_mode();
+    if (mode == 4 && (rx == 2 || ry == 2 || !(c->mode == 0 ? x == y : x != y))) {
+        static uint64_t seen[48];
+        static unsigned nseen;
+        unsigned i = 0;
+        while (i < nseen && seen[i] != c->addr) i++;
+        if (i == nseen && nseen < 48) {
+            seen[nseen++] = c->addr;
+            uint64_t gpu[4] = {0}, cpu[4] = {0};
+            VkMemSpan span;
+            int have_cpu = !nvn_gpu_only(c->addr) && vk_mem_resolve(c->addr, sizeof cpu, &span) && span.avail >= sizeof cpu;
+            if (have_cpu) memcpy(cpu, (const void *)(uintptr_t)c->addr, sizeof cpu);
+            int have_gpu = vk_exec_read_buffer(ex, c->addr, sizeof gpu, gpu);
+            rt_log("vk: conditional GPU readback at %#llx mode %d, CPU readable %d words [%#llx %#llx %#llx %#llx], GPU readable %d words [%#llx %#llx %#llx %#llx], pending %d/%d",
+                   (unsigned long long)c->addr, c->mode, have_cpu,
+                   (unsigned long long)cpu[0], (unsigned long long)cpu[1], (unsigned long long)cpu[2], (unsigned long long)cpu[3],
+                   have_gpu, (unsigned long long)gpu[0], (unsigned long long)gpu[1], (unsigned long long)gpu[2],
+                   (unsigned long long)gpu[3], rx == 2, ry == 2);
+        }
+    }
+    if (rx == 2 || ry == 2) {   // a samples-passed count not done yet
+        vk_exec_frame.cond_pending++;
+        cond_note(ex, c, "pending", 0, 0);
+        return mode != 1;
+    }
+    int on = c->mode == 0 ? x == y : x != y;
+    if (!on) cond_note(ex, c, "disables", x, y);
+    return on || mode == 2;
 }
 
 // ---- textures
@@ -651,6 +799,7 @@ static void copy_b2b(VkExec *ex, const p_copy_b2b *p) {
 // vk_guest_written at the fence, as copies do. Works in CPU-invisible pools.
 
 static void clear_buf(VkExec *ex, const p_clear_buf *p) {
+    if (p->size <= 16) cond_writer_note(p->addr, 'V');
     if ((p->addr | p->size) & 3) {
         warn_once(W_BUFFER, "buffer fill at %#llx of %llu bytes is not 4-byte aligned: skipped", (unsigned long long)p->addr,
                   (unsigned long long)p->size);
@@ -750,7 +899,9 @@ void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload) {
     case OP_RENDER_COND:
         ex->render_cond = *(const p_render_cond *)payload;
         ex->has_render_cond = 1;
-        ex->render_disabled = !cond_enabled(payload);
+        ex->render_disabled = !cond_enabled(ex, payload);
+        vk_exec_frame.cond_evals++, vk_exec_frame.cond_off += ex->render_disabled != 0;
+        if (vk_dump_armed) vk_dump_replay_note(ex, "condition-result enabled=%d", !ex->render_disabled);
         break;
     default: rt_fatal("vk: op %s is not a transfer", nvn_op_name(op));
     }
