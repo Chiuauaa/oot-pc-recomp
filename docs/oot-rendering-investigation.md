@@ -4,6 +4,62 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Native composite audited and all twelve sky coefficients compared
+
+The user asks to follow the actual code for `bright-culling-18/capture-21` pass
+150 and capture 20 pass 149. Capture 21 uses production FS
+`65156d0c69e40c69`; capture 20 uses the diagnostic scene-only variant
+`c10c9989f3258927`, which removes bloom but deliberately retains the curve.
+This explains why both show the curve's brightening; the second is not a test
+of curve bypass.
+
+Disassembly of native `73320e720a317817` confirms the sequence independently of
+the translated SPIR-V: TEX of descriptor words 0xa (bloom) and 0x8 (scene),
+LG2/EX2 with c3+0x34 for bloom power, a 3x3-plus-offset colour transform,
+scene clamp to [0,10000], bloom addition, multiplication by c3+0x38, then
+`x*(2.51*x+0.03)/(x*(2.43*x+0.59)+0.14)` and saturated output. Native split
+texture destinations use bits 16/64: the printed destination order must not be
+mistaken for RG/BA reversal. The observed dest fields place scene RG at R4/R5
+and BA at R2/R3, matching the subsequent arithmetic and translated channels.
+No duplicated curve/addition or channel swap was found in this audit.
+Private native instructions/disassembly are retained only in
+`bright-culling-18/tonemap-native-code.bin` and `tonemap-native.sass`.
+
+Code path checked: `nvn2_lower.cpp` / Ampere `lower_to_maxwell.h` for native
+lowering; `gfx_shader.c::reflect` and shader lookup/cache; `vk_exec_draw.c`
+`shader_for`, `prepare_draw` and `bind_resources`; `vk_pipeline.c`
+`create_graphics` for fragment binding remap/layout selection and module creation.
+The captured output agrees with the expected composite on the actual supplied
+inputs. This does not prove that the original scene inputs/exposure are right.
+
+The next live run (`bright-sh-light-19`) enables the existing
+`TOTK_DUMP_BUF=0x25a4c7f00:0xc0`, keeping the visible console and waiting for the
+user's loaded-map confirmation. The first startup attempt exited before the
+map and was archived, then the same launcher was reopened successfully. No
+loading screenshot was taken. CPU-address reads of this mirrored range returned
+zeros where GPU coefficients are nonzero; they are not used as lighting values.
+
+The ordered GPU snapshots change at pass 67 (CS `21238adc0f99baaf`), bytes
+0x30..0x6c. Source sky image is captured in the same frame at pass 65. Recompute
+all RGB coefficients, not only L0, from the 1024 sphere samples and the captured
+RGBA16F image/parameters. GPU rows L0/Y/Z/X are:
+
+| Row | RGB |
+| --- | --- |
+| L0 | [6.502570,8.394205,12.917498] |
+| Y | [2.930013,4.376832,7.785160] |
+| Z | [1.666567,1.644109,1.673620] |
+| X | [-0.955176,-0.912729,-0.901071] |
+
+Maximum absolute error against ideal CPU interpolation is 0.00028634; with
+8-bit subtexel interpolation it is 0.00028564. Signs and axis ordering are
+preserved. This strongly excludes a large coefficient accumulation, corruption
+or lost sign in this dispatch for this capture. It is a reference integration
+of the supplied radiance, not proof that the radiance/atmospheric parameters
+match an original-console scene. Evidence: `bufs.txt`, `buf_0067.bin`,
+`full-sh-reference.json`, `analyze_sh_buffer.py` in `bright-sh-light-19`.
+No light scale, specular removal or tone-curve bypass is installed as a fix.
+
 ### User-identified pass 149: separate tone curve and bloom tested live
 
 The user identifies `bright-culling-18/capture-14/pass_0149_t0` as excessively

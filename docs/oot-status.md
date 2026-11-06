@@ -2,6 +2,18 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: native composite and full sky-lighting buffer checked
+
+- Follow the cited composite to native SASS: scene transform, bloom addition,
+  gain and the brightening curve are already present in the original shader.
+  No duplicate curve or texture-result channel swap was found.
+- Read the lighting buffer from the GPU in a loaded-map capture, comparing all
+  12 L0/Y/Z/X RGB coefficients to integration of the same-frame source image.
+  Maximum absolute error is 0.000287; negative X coefficients are preserved.
+- This excludes large SH accumulation corruption in the measured dispatch.
+  Input atmospheric radiance/exposure and material response remain unresolved.
+  Keep grass disabled; no artificial light scale or curve removal was applied.
+
 ## 6 November 2026: user-identified composite tested with curve and bloom separated
 
 - Capture 14 pass 149 is the shared tone-map composite. Its scene input is
