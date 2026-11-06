@@ -251,6 +251,44 @@ int main(int argc, char **argv) {
     gpu(0, 0, 0, 0, sp.buffer, sp.offset, &rb, 4096);
     CHECK("G3. the next submit reads the CPU write", all(rb.map, 0x77, 4096));
 
+    // --- I: the CPU writes v1 after submit N, a later sync merges it, then the CPU writes v2 before N's fence.
+    // The fence must not bring v1 back.
+    uint64_t I = 7 * MIB;
+    vk_mem_resolve(BASE + I, 4096, &sp); vk_mem_gpu_pending(BASE + I, 4096); vk_mem_shadow_sync();
+    gpu(sp.buffer, sp.offset, 16, 0x9A9A9A9A, 0, 0, NULL, 0);                // N writes bytes 0-15
+    memset(G(I + 512), 0x31, 64);                                             // v1
+    vk_mem_resolve(BASE + I, 4096, &sp); vk_mem_shadow_sync();               // N+1 (reads only)
+    memset(G(I + 512), 0x32, 64);                                             // v2
+    vk_gpu_written(BASE + I, 4096);                                           // N's fence
+    vk_mem_resolve(BASE + I + 512, 64, &sp); vk_mem_shadow_sync();
+    gpu(0, 0, 0, 0, sp.buffer, sp.offset + 0, &rb, 64);
+    CHECK("I1. a second CPU write after a merge survives the fence", all(G(I + 512), 0x32, 64) && all(G(I), 0x9A, 16));
+    CHECK("I2. the next submit reads the second CPU write", all(rb.map, 0x32, 64));
+
+    // --- J: two overlapping pending ranges, [0, 8K) and [4K, 12K), each written by the GPU at its start; the CPU
+    // writes inside the overlap after both submits. Every write must survive both fences.
+    uint64_t J = 9 * MIB;
+    vk_mem_resolve(BASE + J, 8192, &sp); vk_mem_gpu_pending(BASE + J, 8192); vk_mem_shadow_sync();
+    gpu(sp.buffer, sp.offset, 16, 0x1E1E1E1E, 0, 0, NULL, 0);
+    vk_mem_resolve(BASE + J + 4096, 8192, &sp); vk_mem_gpu_pending(BASE + J + 4096, 8192); vk_mem_shadow_sync();
+    gpu(sp.buffer, sp.offset, 16, 0x2E2E2E2E, 0, 0, NULL, 0);
+    memset(G(J + 6000), 0x3E, 100);
+    vk_gpu_written(BASE + J, 8192);
+    vk_gpu_written(BASE + J + 4096, 8192);
+    CHECK("J1. overlapping ranges: both GPU writes and the CPU write in the overlap stay",
+          all(G(J), 0x1E, 16) && all(G(J + 4096), 0x2E, 16) && all(G(J + 6000), 0x3E, 100) && all(G(J + 5000), 0x11, 16));
+
+    // --- K: an unaligned range (odd start, odd size); the GPU writes 4 aligned bytes inside, the CPU writes the first
+    // and the last byte of the range after the submit.
+    uint64_t K = 3 * MIB + 1, KN = 4093;
+    vk_mem_resolve(BASE + K, KN, &sp); vk_mem_gpu_pending(BASE + K, KN); vk_mem_shadow_sync();
+    gpu(sp.buffer, (sp.offset + 15) & ~3ull, 4, 0x4B4B4B4B, 0, 0, NULL, 0);
+    G(K)[0] = 0x5B, G(K)[KN - 1] = 0x6B;
+    vk_gpu_written(BASE + K, KN);
+    uint64_t kg = ((sp.offset + 15) & ~3ull) - sp.offset;
+    CHECK("K1. unaligned range: GPU bytes and both edge CPU bytes stay",
+          all(G(K + kg), 0x4B, 4) && G(K)[0] == 0x5B && G(K)[KN - 1] == 0x6B && G(K + KN)[0] == 0x11);
+
     printf("  result: %d failure(s)\n", fails);
     return fails != 0;
 }

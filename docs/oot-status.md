@@ -11,11 +11,14 @@ yet observed in the game.
   `OOT_SBO_UNSIZED_MB`). While it is pending, shadow_copy keeps the CPU's writes inside it out of the shadow, also
   those made before the submit, so a shader reads older input; at the fence vk_gpu_written copies the whole range
   back over guest memory, so CPU writes made after the submit are lost. Import (Windows default) passes the same
-  scenarios. `OOT_SHADOW_CONFLICTS=1` logs the collisions; `OOT_SHADOW_CPU_WINS=1` lets the CPU's pages win, and
-  passes every shadow scenario (A-G).
+  scenarios. `OOT_SHADOW_CONFLICTS=1` logs the collisions; `OOT_SHADOW_CPU_WINS=1` lets the CPU's pages win (per
+  page: GPU bytes in a page the CPU also wrote are lost); `OOT_SHADOW_MERGE=1` merges guest, shadow and a copy of each
+  pending range byte by byte and passes every shadow scenario (A-K), keeping both writes when the CPU and the GPU
+  write different bytes of one page.
 - **The VRAM mirror loses them on both systems.** vk_mem_mirror_end copies the whole written range from the mirror
-  back to the pool after each submission, with the import as well (scenario H). With `OOT_SHADOW_CPU_WINS=1` only
-  the submission already queued at the CPU write reads the older page. The real fix is narrower GPU write ranges.
+  back to the pool after each submission, with the import as well (scenario H). With `OOT_SHADOW_CPU_WINS=1` or
+  `OOT_SHADOW_MERGE=1` (shadow only) only the submission already queued at the CPU write reads the older page. The
+  import path with a mirror (Windows) still needs the mirror's write-back to go through a merge.
 - **VRAM.** On a discrete GPU a pool is mirrored whole at its first buffer bind, texture bytes included, up to 7/8 of
   the budget (vram_sim: twelve 4 KiB buffers in 64 MiB pools took 896 MiB), while ASTC textures are decoded to RGBA8
   images of 4-16 times their size (`TOTK_ASTC_BC=1`: BC3). `OOT_MIRROR_MAX_PCT=<p>` caps the mirrors at p% of the

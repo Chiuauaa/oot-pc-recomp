@@ -5,7 +5,7 @@
 # what the GPU reads.
 #
 #   write_watch_test, write_watch_race_test  userfaultfd write watch: semantics and concurrent writes vs. scans
-#   shadow_sim    scenarios A-G: shadow storage vs. import, with and without OOT_SHADOW_CPU_WINS
+#   shadow_sim    scenarios A-K: shadow storage vs. import, with OOT_SHADOW_CPU_WINS and OOT_SHADOW_MERGE
 #   mirror_sim    scenario H: the VRAM mirror path with the GPU held back by an event (overlapping submissions)
 #   vram_sim      device memory taken by whole-pool mirrors, and OOT_MIRROR_MAX_PCT
 #
@@ -28,13 +28,17 @@ for s in shadow_sim mirror_sim vram_sim; do
 done
 cd "$O"
 ./write_watch_test; ./write_watch_race_test
-# Expected: import 0 failures; shadow 6 (A2 A3 E1 E2 G1 G3); shadow + CPU_WINS 0.
+# Expected: import 0 failures; shadow 10 (A2 A3 E1 E2 G1 G3 I1 I2 J1 K1); CPU_WINS 3 (I1 J1 K1: it decides per
+# page, so GPU bytes in a page the CPU also wrote are lost); MERGE 0.
 TOTK_SHADOW=0 ./shadow_sim "import (Windows default)" || true
 ./shadow_sim "shadow (Linux default)" || true
 OOT_SHADOW_CPU_WINS=1 ./shadow_sim "shadow, OOT_SHADOW_CPU_WINS=1" || true
-# Expected: H1-H3 fail without the fix on both import and shadow; with CPU_WINS only H1 (the submission already queued).
+OOT_SHADOW_MERGE=1 ./shadow_sim "shadow, OOT_SHADOW_MERGE=1" || true
+# Expected: H1-H3 fail without a fix on both import and shadow; with CPU_WINS or MERGE only H1 (the submission
+# already queued when the CPU wrote reads the older page; the next one reads the CPU's).
 TOTK_SHADOW=0 TOTK_MEMORY=mirror ./mirror_sim "import + mirror" || true
 TOTK_MEMORY=mirror ./mirror_sim "shadow + mirror" || true
 TOTK_MEMORY=mirror OOT_SHADOW_CPU_WINS=1 ./mirror_sim "shadow + mirror, OOT_SHADOW_CPU_WINS=1" || true
+TOTK_MEMORY=mirror OOT_SHADOW_MERGE=1 ./mirror_sim "shadow + mirror, OOT_SHADOW_MERGE=1" || true
 TOTK_SHADOW=0 TOTK_MEMORY=mirror ./vram_sim
 TOTK_SHADOW=0 TOTK_MEMORY=mirror OOT_MIRROR_MAX_PCT=3 ./vram_sim
