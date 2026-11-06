@@ -1003,8 +1003,10 @@ typedef struct { uint64_t lo, hi; uint32_t anchor; } SRange;   // anchor: gen_no
 // fence write-back (vk_gpu_written) copied over CPU writes made after the submission. GPU write ranges are whole
 // bindings (unsized storage buffers: OOT_SBO_UNSIZED_MB, 8 MiB), so they can cover CPU-written data the GPU never
 // touches. Windows imports guest memory and has neither effect.
-static int sc_mode = -1;                           // 0 off, 1 count
-static uint64_t s_withheld, s_clobber;             // shadow_lock: since the last log
+// OOT_SHADOW_CPU_WINS=1 (implies the count): pages the CPU wrote go into the shadow even inside a pending range, and
+// the write-back leaves pages the CPU wrote after the submission as the CPU wrote them.
+static int sc_mode = -1;                           // 0 off, 1 count, 2 count + CPU wins
+static uint64_t s_withheld, s_clobber, s_kept;     // shadow_lock: since the last log
 static uint32_t *ggen_chunk[RT_ADDRESS_LIMIT >> 28];   // gen_lock: the generation of each page's last write-back stamp
 // gen_lock held: the page's last stamp came from a GPU write-back (vk_gpu_written), not from a CPU write
 static uint32_t ggen_of(uint64_t page) {
@@ -1013,9 +1015,9 @@ static uint32_t ggen_of(uint64_t page) {
 }
 static int shadow_conflicts(void) {
     if (sc_mode < 0) {
-        const char *c = cfg_get("OOT_SHADOW_CONFLICTS");
-        sc_mode = c && *c && strcmp(c, "0") ? 1 : 0;
-        if (sc_mode) rt_log("mem: shadow conflicts: counted");
+        const char *w = cfg_get("OOT_SHADOW_CPU_WINS"), *c = cfg_get("OOT_SHADOW_CONFLICTS");
+        sc_mode = w && *w && strcmp(w, "0") ? 2 : c && *c && strcmp(c, "0") ? 1 : 0;
+        if (sc_mode) rt_log("mem: shadow conflicts: %s", sc_mode == 2 ? "counted, CPU writes win" : "counted");
     }
     return sc_mode;
 }
@@ -1173,6 +1175,7 @@ static void shadow_copy_x(PoolRec *r, uint64_t a, uint64_t b, int i, int dirty);
 static void shadow_copy(PoolRec *r, uint64_t a, uint64_t b, int i) { shadow_copy_x(r, a, b, i, 0); }
 // dirty: [a, b) holds pages the write watch found written by the CPU
 static void shadow_copy_x(PoolRec *r, uint64_t a, uint64_t b, int i, int dirty) {
+    if (dirty && shadow_conflicts() == 2) i = nspend;   // CPU wins: its writes reach the GPU
     for (; i < nspend; i++)
         if (spend[i].lo < b && spend[i].hi > a) {
             if (dirty && shadow_conflicts()) {
@@ -1214,8 +1217,9 @@ static void shadow_sync_pool(PoolRec *r) {
         shadow_copy(r, lo, hi, 0);
         return;
     }
-    // Runs of pages newer than the shadow, split by who stamped them: 2 = a CPU write, 1 = a GPU write-back only
-    // (shadow_conflicts counts only the first kind).
+    // Runs of pages newer than the shadow, split by who stamped them: 2 = a CPU write (or a page the CPU won at a
+    // write-back), 1 = a GPU write-back only (shadow_conflicts: such a page keeps the pending-range exclusion, so the
+    // GPU state of a submission still in flight is not replaced by the older one just written back).
     uint64_t run = 0;
     int cur = 0;
     for (uint64_t k = lo >> REG_SHIFT; k <= (hi - 1) >> REG_SHIFT; k++) {
@@ -1284,18 +1288,26 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
             if (sc && anchor) {
                 // Pages the CPU wrote after the submission: stamped above anchor by a query, and not by a write-back.
                 uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull, run = addr;
+                uint8_t *kept = sc == 2 ? calloc((size_t)((hi - lo) >> 12), 1) : NULL;
+                if (sc == 2 && !kept) rt_fatal("vk: out of memory for a write-back");
                 plat_mutex_lock(&gen_lock);
                 int tracked = query_stamp(lo, hi, ++gen_now);
                 for (uint64_t x = lo; x < hi; x += 0x1000) {
+                    uint64_t a = x > addr ? x : addr, b = x + 0x1000 < addr + size ? x + 0x1000 : addr + size;
                     const uint32_t *s = gen_slot(x, 0), *gc = ggen_chunk[x >> GEN_CHUNK_SHIFT];
                     uint32_t gg = gc ? gc[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] : 0;
                     int cpu = tracked && s && *s > anchor && *s != gg;
                     if (!cpu) continue;
                     static volatile int32_t lines;
                     if (plat_inc32(&lines) <= 16)
-                        rt_log("mem: shadow conflict: write-back of %#llx+%#llx overwrites the CPU's write to page %#llx",
-                               (unsigned long long)addr, (unsigned long long)size, (unsigned long long)x);
-                    s_clobber++;
+                        rt_log("mem: shadow conflict: write-back of %#llx+%#llx %s the CPU's write to page %#llx",
+                               (unsigned long long)addr, (unsigned long long)size,
+                               sc == 2 ? "keeps" : "overwrites", (unsigned long long)x);
+                    if (sc == 2) {
+                        if (a > run) memcpy((void *)(uintptr_t)run, r->smap + (run - r->import_lo), a - run);
+                        run = b, s_kept++;
+                        kept[(x - lo) >> 12] = 1;
+                    } else s_clobber++;
                 }
                 if (addr + size > run)
                     memcpy((void *)(uintptr_t)run, r->smap + (run - r->import_lo), addr + size - run);
@@ -1315,10 +1327,13 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
                         if (ci >= sizeof ggen_chunk / sizeof *ggen_chunk) continue;
                         if (!ggen_chunk[ci] && !(ggen_chunk[ci] = calloc(GEN_PER_CHUNK, sizeof(uint32_t))))
                             rt_fatal("vk: out of memory for write-back generations");
-                        ggen_chunk[ci][(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] = g;
+                        // a page the CPU kept stays a CPU write: later syncs copy it in and later write-backs of
+                        // ranges submitted before it keep it too
+                        ggen_chunk[ci][(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] = kept && kept[(x - lo) >> 12] ? 0 : g;
                     }
                 }
                 plat_mutex_unlock(&gen_lock);
+                free(kept);
                 s_wb_bytes += size;
                 if (si >= 0) spend[si] = spend[--nspend];
                 plat_mutex_unlock(&shadow_lock);
@@ -1345,8 +1360,9 @@ static void shadow_log(uint64_t frame) {
            qpc_ms(s_ticks), nspend);
     if (sc_mode > 0)
         rt_log("mem: shadow conflicts since the last: %.2f MiB of CPU writes kept out of pending GPU ranges, %llu pages "
-               "of CPU writes overwritten by write-backs", s_withheld / 1048576.0, (unsigned long long)s_clobber);
-    s_withheld = s_clobber = 0;
+               "of CPU writes overwritten by write-backs, %llu kept", s_withheld / 1048576.0,
+               (unsigned long long)s_clobber, (unsigned long long)s_kept);
+    s_withheld = s_clobber = s_kept = 0;
     s_syncs = s_queries = s_copied = s_untracked = s_wb_bytes = s_ticks = 0;
     plat_mutex_unlock(&shadow_lock);
 }
