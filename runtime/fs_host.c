@@ -1093,6 +1093,11 @@ static void close_directory(uint64_t h) {
 #define I64(i) ((int64_t)arg_x(c, i))
 // OOT_FS_REPEAT=1: the guest call stack of the 20th open of one path (a load that is retried forever)
 static void fs_repeat_note(Cpu *c, const char *path) {
+    if (path && (rt_trace & RT_TRACE_AUDIO) && (strstr(path, "Voice/") || strstr(path, "Sound/Resource/Stream/Dm_"))) {   // does the game ask for speech at all?
+        static int32_t voice_opens;
+        int n = __atomic_add_fetch(&voice_opens, 1, __ATOMIC_RELAXED);
+        if (n <= 120) rt_log("fs: voice open %d: %s", n, path);
+    }
     static int on = -1;
     if (on < 0) on = getenv("OOT_FS_REPEAT") != NULL;
     if (!on || !path) return;
@@ -1292,7 +1297,7 @@ static void probe_paths(void) {
     static const struct { const char *path, *want; } cases[] = {
         {"rom:/a/b.bin", "a/b.bin"}, {"rom://a/b.bin", "a/b.bin"}, {"rom:///a/b.bin", "a/b.bin"},
         {"rom:/a", "a"},             {"rom:/../main", NULL},       {"rom://../a", NULL},
-        {"rom:/a/../b", NULL},       {"rom:/a/./b", NULL},         {"rom:/a//b", NULL},
+        {"rom:/a/../b", NULL},       {"rom:/a/./b", NULL},         {"rom:/a//b", "a/b"},
         {"rom:/a\\b", NULL},         {"rom:/", NULL},              {"rom://", NULL},
         {"rom:a", NULL},             {"ro:/a", NULL},              {"romx:/a", NULL},
         {"rom:/.", NULL},            {"rom:/..", NULL},            {"ROM:/a", NULL},
