@@ -38,10 +38,19 @@ int main(int argc,char **argv) {
  VkPhysicalDeviceMeshShaderPropertiesEXT limits={.maxMeshWorkGroupSize={128,128,128},.maxMeshWorkGroupInvocations=128,
  .maxTaskWorkGroupSize={128,128,128},.maxTaskWorkGroupInvocations=128,.maxMeshOutputVertices=256,
  .maxMeshOutputPrimitives=256,.maxTaskPayloadSize=16384,.maxTaskPayloadAndSharedMemorySize=32768,
- .maxMeshPayloadAndSharedMemorySize=32768};
+ .maxMeshPayloadAndSharedMemorySize=32768,.maxMeshSharedMemorySize=32768,.maxTaskSharedMemorySize=32768};
  CHECK(!vk_mesh_execution_limits(NULL,&good,&limits));
  CHECK(!vk_mesh_execution_limits(&good,&good,&limits));
- GfxShaderMesh mismatch=good;mismatch.payload_words++;CHECK(vk_mesh_execution_limits(&mismatch,&good,&limits));
+ uint32_t shared_module[sizeof(module)/4+8];memcpy(shared_module,module,sizeof(module));
+ uint32_t shared_tail[]={I(32,4),7,4,4,I(59,4),7,8,4};
+ memcpy(shared_module+sizeof(module)/4,shared_tail,sizeof(shared_tail));
+ s.spirv=shared_module;s.words=sizeof(shared_module)/4;
+ CHECK(mesh_spirv(&s));CHECK(s.mesh.shared_bytes==128);
+ s.spirv=module;s.words=sizeof(module)/4;CHECK(mesh_spirv(&s));CHECK(!s.mesh.shared_bytes);
+ GfxShaderMesh mismatch=good;mismatch.shared_bytes=32769;CHECK(vk_mesh_execution_limits(NULL,&mismatch,&limits));
+ mismatch=good;mismatch.shared_bytes=32768;CHECK(vk_mesh_execution_limits(NULL,&mismatch,&limits));
+ mismatch=good;mismatch.shared_bytes=32768;CHECK(vk_mesh_execution_limits(&mismatch,&good,&limits));
+ mismatch=good;mismatch.payload_words++;CHECK(vk_mesh_execution_limits(&mismatch,&good,&limits));
  mismatch=good;mismatch.local[0]=UINT32_MAX;CHECK(vk_mesh_execution_limits(NULL,&mismatch,&limits));
  mismatch=good;mismatch.local[0]=64;mismatch.local[1]=4;CHECK(vk_mesh_execution_limits(NULL,&mismatch,&limits));
  mismatch=good;mismatch.max_vertices=257;CHECK(vk_mesh_execution_limits(NULL,&mismatch,&limits));
@@ -74,7 +83,9 @@ int main(int argc,char **argv) {
   FILE *f=fopen(argv[1],"rb");CHECK(f);fseek(f,0,SEEK_END);long len=ftell(f);rewind(f);s.spirv=malloc(len);CHECK(s.spirv);CHECK(fread(s.spirv,len,1,f)==1);fclose(f);s.words=len/4;
   f=fopen(argv[2],"rb");CHECK(f);fseek(f,0,SEEK_END);len=ftell(f);rewind(f);char *j=calloc((size_t)len+1,1);CHECK(j);CHECK(fread(j,len,1,f)==1);fclose(f);
   s.stage=strstr(j,"\"stage\": \"ts\"")?GFX_STAGE_TS:GFX_STAGE_MS;
-  CHECK(mesh_json(j,j+len,s.stage,&s.mesh));CHECK(mesh_spirv(&s));free(j);free(s.spirv);
+  CHECK(mesh_json(j,j+len,s.stage,&s.mesh));CHECK(mesh_spirv(&s));
+  printf("shared_bytes=%u payload_bytes=%u\n",s.mesh.shared_bytes,s.mesh.payload_words*4);
+  free(j);free(s.spirv);
  }
  printf("Mesh metadata contract: %u checks passed\n",checks);return 0;
 }

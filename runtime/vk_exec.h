@@ -13,6 +13,7 @@
 
 // NVN stages whose bound resources the executor keeps (VkExec.ubo and the handle tables).
 #define VK_EXEC_STAGES 8
+enum { VK_EXEC_TASK = 6, VK_EXEC_MESH = 7 };
 
 // Dynamic state the next draw must record (VkExec.dirty). vk_exec_record sets them all at the start of each command
 // buffer; the state ops set theirs; vk_exec_draw.c clears what it recorded.

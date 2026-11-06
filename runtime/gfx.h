@@ -126,6 +126,7 @@ typedef struct {
 const GfxShaderGeometry *gfx_shader_geometry(const GfxShader *s);
 typedef struct {
     uint32_t local[3], payload_words, max_vertices, max_primitives, topology;
+    uint32_t shared_bytes;         // derived from actual Workgroup variables, including compiler scratch
     uint32_t inferred_registers;   // control-layout hypothesis, not a verified NVN driver ABI
 } GfxShaderMesh;
 // Validated task/mesh execution metadata; NULL for any other stage.

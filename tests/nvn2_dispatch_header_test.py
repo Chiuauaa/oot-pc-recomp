@@ -17,7 +17,7 @@ def main():
 #include <stdlib.h>
 #include "nvn2_c0.h"
 #define VK_C0_BYTES NVN2_C0_BYTES
-enum {NVN_STAGE_VS=0, NVN_STAGE_FS=1, NVN_STAGE_GS=4, NVN_STAGE_CS=5};
+enum {NVN_STAGE_VS=0, NVN_STAGE_FS=1, NVN_STAGE_GS=2, NVN_STAGE_CS=5, VK_EXEC_TASK=6, VK_EXEC_MESH=7};
 static const Nvn2C0Layout *c0_lay;
 static uint32_t c0_push[8][64];
 static void rt_fatal(const char *message) { (void)message; abort(); }

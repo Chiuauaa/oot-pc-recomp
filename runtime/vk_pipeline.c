@@ -1521,6 +1521,8 @@ static VkShaderStageFlags stage_bit(int stage) {
     case GFX_STAGE_GS: return VK_SHADER_STAGE_GEOMETRY_BIT;
     case GFX_STAGE_FS: return VK_SHADER_STAGE_FRAGMENT_BIT;
     case GFX_STAGE_CS: return VK_SHADER_STAGE_COMPUTE_BIT;
+    case GFX_STAGE_TS: return VK_SHADER_STAGE_TASK_BIT_EXT;
+    case GFX_STAGE_MS: return VK_SHADER_STAGE_MESH_BIT_EXT;
     default: return 0;
     }
 }

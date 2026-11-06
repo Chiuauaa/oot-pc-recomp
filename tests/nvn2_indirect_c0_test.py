@@ -27,6 +27,12 @@ typedef struct { uint64_t srcOffset, dstOffset, size; } VkBufferCopy;
 typedef struct { VkBuffer buffer; uint64_t offset; int cls; } VkMemSpan;
 typedef struct { void *prog; int cb; unsigned recorded; } VkExec;
 typedef int GfxShader;
+// The numerical override is inactive in this buffer-copy fixture.
+static struct { uint64_t frames; } gfx_counters;
+static const GfxShader *gfx_shader_debug_compute_override(const GfxShader *s, uint64_t frame) {
+    (void)frame; return s;
+}
+
 typedef int VkPipeInfo;
 enum { W_PROGRAM, W_INDIRECT, W_PIPELINE, NVN_STAGE_CS=5, VK_PIPELINE_BIND_POINT_COMPUTE=1, VK_MUSE_IND=1 };
 static const Nvn2C0Layout *c0_lay;

@@ -2,6 +2,19 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: task/mesh bindings and actual shared allocations tested
+
+- Map TS/MS to separate NVN resource stages and driver storage tables
+  c0+0x110/c0+0x310; keep six independent cached driver banks. Production
+  mapping/fill/resolution tests pass 78 checks at O0 and O2.
+- Derive shared-memory bytes from emitted SPIR-V, including compiler ISBE
+  scratch. Check both standalone shared and joint payload/shared limits.
+  Largest retained allocation is 16,916 bytes; 41 modules validate.
+- Contract tests now pass 52 checks per optimization; indirect compute passes
+  34 checks after updating its fixture for the earlier optional probe hook.
+- Mesh pipeline/draw execution is still pending; no residual brightness fix
+  is claimed. The handoff records the next contracts to validate.
+
 ## 6 November 2026: task/mesh metadata matched to emitted modules
 
 - Add mesh contract version 1; reject reflection that disagrees with SPIR-V

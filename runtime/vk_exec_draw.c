@@ -124,12 +124,12 @@ static struct {
     VkBuffer sup_buf;
     VkDeviceSize sup_off;
     int sup_valid;
-    uint8_t c0[4][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute, geometry) and where it lives
-    VkBuffer c0_buf[4];
-    VkDeviceSize c0_off[4];
-    int c0_valid[4];
+    uint8_t c0[6][VK_C0_BYTES];          // last c0 bank per stage (vertex, fragment, compute, geometry, task, mesh) and where it lives
+    VkBuffer c0_buf[6];
+    VkDeviceSize c0_off[6];
+    int c0_valid[6];
     struct { p_bind_buf ssbo[16], ubo[16]; uint32_t dim[3], binst; Nvn2C0Layout lay; uint8_t has_lay;
-             uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[4];   // what vk_c0_fill read for c0[k]
+             uint32_t roots[NVN2_ROOT_TABLES][NVN2_ROOT_WORDS]; } c0_in[6];   // what vk_c0_fill read for c0[k]
     VkPipelineLayout ds_layout;          // graphics layout the sets below were last pushed or bound with
     VkDescriptorSet ds_bound[2];         // allocated set bound per set number (0: none or pushed since)
     VkDescriptorSet ds_last[2];          // last allocated and written set per set number, contents in DS
@@ -1005,7 +1005,8 @@ static const GfxShader *shader_for(VkExec *ex, int st, int *present, int *pendin
 
 static int nvn_stage_of(int gfx_stage) {
     return gfx_stage == GFX_STAGE_VS ? NVN_STAGE_VS : gfx_stage == GFX_STAGE_FS ? NVN_STAGE_FS :
-           gfx_stage == GFX_STAGE_GS ? NVN_STAGE_GS : gfx_stage == GFX_STAGE_CS ? NVN_STAGE_CS : -1;
+           gfx_stage == GFX_STAGE_GS ? NVN_STAGE_GS : gfx_stage == GFX_STAGE_CS ? NVN_STAGE_CS :
+           gfx_stage == GFX_STAGE_TS ? VK_EXEC_TASK : gfx_stage == GFX_STAGE_MS ? VK_EXEC_MESH : -1;
 }
 
 static VkDescriptorBufferInfo zero_info(uint64_t max) {
@@ -1094,7 +1095,7 @@ void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16],
     }
     memset(bank, 0, VK_C0_BYTES);
     int base =stage == NVN_STAGE_VS ? 0x110 : stage == NVN_STAGE_FS ? 0x510 : stage == NVN_STAGE_CS ? 0x310 :
-              stage == NVN_STAGE_GS ? 0x410 : -1;   // geometry (DKB_NATIVE_GS): the table ssbo_slot expects
+              stage == NVN_STAGE_GS ? 0x410 : stage == VK_EXEC_TASK ? 0x110 : stage == VK_EXEC_MESH ? 0x310 : -1;   // geometry (DKB_NATIVE_GS): the table ssbo_slot expects
     if (base < 0) return;
     c0_table(bank + base, ssbo);
     if (stage == NVN_STAGE_CS) {
@@ -1116,10 +1117,14 @@ static int c0_on(void) {   // TOTK_FIX_C0=0: c0 reads zeros instead of the drive
 }
 
 // c0 from replay scratch; a bank equal to the stage's previous one reuses its range, so it costs no copy.
+static int c0_cache_index(int st) {
+    return st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : st == NVN_STAGE_CS ? 2 :
+           st == NVN_STAGE_GS ? 3 : st == VK_EXEC_TASK ? 4 : st == VK_EXEC_MESH ? 5 : -1;
+}
+
 static VkDescriptorBufferInfo c0_info(VkExec *ex, int st) {
-    if (st != NVN_STAGE_VS && st != NVN_STAGE_FS && st != NVN_STAGE_CS && st != NVN_STAGE_GS)
-        rt_fatal("vk_exec: synthetic c0 is unavailable for stage %d", st);
-    int k = st == NVN_STAGE_VS ? 0 : st == NVN_STAGE_FS ? 1 : st == NVN_STAGE_GS ? 3 : 2;
+    int k = c0_cache_index(st);
+    if (k < 0) rt_fatal("vk_exec: synthetic c0 is unavailable for stage %d", st);
     // vk_c0_fill reads buffer bindings, compute root words and dispatch size, or the graphics base instance:
     // equal inputs give the same bank, so neither the fill nor the 2 KiB compare is needed.
     typeof(B.c0_in[0]) in;
@@ -1218,8 +1223,11 @@ static int ssbo_slot(const GfxShaderRes *r, int st, int *ubo) {
     // Eglantine shader_recompiler/frontend/maxwell/translate_program.cpp::AddNVNStorageBuffers uses a distinct
     // ordinary geometry table at c0+0x410. This only maps declared
     // bindings; it does not synthesize that driver bank or establish the native NVN2 geometry ABI.
+    // The same reference maps Task to the vertex table and Mesh to the tessellation-evaluation table;
+    // resources still come from their separate NVN 2 stage-6/7 bindings.
     int off = r->handle * 4, base = st == NVN_STAGE_VS ? 0x110 : st == NVN_STAGE_FS ? 0x510 :
-                                  st == NVN_STAGE_GS ? 0x410 : st == NVN_STAGE_CS ? 0x310 : -1;
+                                  st == NVN_STAGE_GS ? 0x410 : st == NVN_STAGE_CS ? 0x310 :
+                                  st == VK_EXEC_TASK ? 0x110 : st == VK_EXEC_MESH ? 0x310 : -1;
     if (st == NVN_STAGE_CS && off >= 0x210 && off < 0x310 && (off - 0x210) % 16 == 0) {
         *ubo = 1;
         return (off - 0x210) / 16;

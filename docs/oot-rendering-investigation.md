@@ -4,6 +4,59 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Task/mesh resource tables and generated Workgroup memory checked
+
+The next integration pass extends stage mappings before enabling execution:
+`vk_exec_draw.c::nvn_stage_of` maps translated TS/MS to separate NVN stages 6/7;
+`vk_c0_fill` writes their storage descriptor tables at c0+0x110 / c0+0x310;
+`ssbo_slot` resolves those same locations against the matching stage's bound
+resources. These offsets follow Eglantine's
+`shader_recompiler/frontend/maxwell/translate_program.cpp::AddNVNStorageBuffers`
+and the local compiler's `CapturedEnvironment::IsCbufStorageBufferPointer`.
+They are not an assertion that the rest of the native task/mesh driver header
+or first-group semantics is known. c0 memo storage expands to six independent
+banks (VS/FS/CS/GS/TS/MS), avoiding reuse between these stage-specific tables.
+Pipeline stage-flag mapping now recognizes TASK_BIT_EXT and MESH_BIT_EXT; the
+pipeline construction/draw path remains unimplemented.
+
+`tests/mesh_shader_bindings_test.py` exercises the production fill, stage map,
+cache-index map and storage-slot resolver: 78 checks at O0 and O2 cover all
+16 slots, distinct stage addresses, preserved sizes, misaligned table offsets,
+non-driver constant buffers and rejection of the compute-only UBO alias for
+mesh. Dispatch-header regressions pass. The indirect-dispatch fixture needed
+an inert numerical-override provider and frame counter because the production
+function acquired that diagnostic hook in an earlier change; after updating
+the fixture its 34 checks pass. No indirect replay semantics were changed for
+that fixture correction.
+
+A separate memory admission gap was found: the compiler emits additional ISBE
+scratch arrays as Workgroup variables. The native requested shared-memory size
+alone omits these allocations. `gfx_shader.c::mesh_spirv` now derives
+`GfxShaderMesh.shared_bytes` from the emitted scalar/vector/array declarations
+and Workgroup variables, checking for arithmetic overflow. Three-component
+vectors receive conservative four-component storage alignment. Unsupported
+Workgroup aggregate/pointer layouts fail instead of being assigned zero size.
+The emitted non-explicit Eglantine layout is currently flat arrays; this is not
+a general SPIR-V layout calculator or support for explicit aliasing.
+
+`vk_mesh_execution_limits` checks shared-memory limits and combined
+payload/shared-memory limits with 64-bit arithmetic. Its tests now include
+emitted Workgroup scratch and joint-limit violations: 52 checks pass at both
+optimizations. All 41 retained scene modules pass the updated validator.
+The largest measured Workgroup allocation is 16,916 bytes with a 128-byte
+payload (`222d6e81642f3ce8`); other examples include 13,588 and 12,564 bytes.
+Thus compiler scratch is material to device admission even where source shared
+memory appears small. Private figures are in
+`build/oot-fix/mesh-compiler/runtime-shared-sizes.json` and
+`runtime-contract-shared-check.json`.
+
+Still required before executing draws: mesh/task module pipeline creation;
+per-vertex/per-primitive output memory/interface limits; task/mesh payload
+semantics beyond size equality; correct direct/indirect group arguments; and
+runtime GPU validation. The limit helper is still not a replay path. These
+changes fix prerequisites, not the reported residual brightness, and do not
+justify disabling or scaling illumination. No new visual fix is claimed.
+
 ### Task/mesh execution metadata now checked against emitted SPIR-V
 
 The runtime now requires mesh metadata version 1. `gfx_shader.c::mesh_json`

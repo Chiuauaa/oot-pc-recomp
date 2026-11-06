@@ -966,13 +966,15 @@ enum { OP_ENTRY_POINT = 15, OP_EXECUTION_MODE = 16, OP_TYPE_INT = 21, OP_TYPE_FL
 
 // Match the compiler contract to one EXT task/mesh entry point and its literal execution modes.
 // The emitted payload ABI is one flat array of 32-bit unsigned words, shared identically by both stages.
-static int mesh_spirv(const GfxShader *s) {
+static int mesh_spirv(GfxShader *s) {
     const uint32_t *w = s->spirv;
-    const GfxShaderMesh *m = &s->mesh;
+    GfxShaderMesh *m = &s->mesh;
+    m->shared_bytes = 0;
     if (!w || s->words < 5 || w[0] != 0x07230203 || !w[3] || w[3] > 1000000) return 0;
-    uint32_t *types = calloc((size_t)w[3] * 4, sizeof *types);
+    uint32_t *types = calloc((size_t)w[3] * 6, sizeof *types);
     if (!types) return 0;
     uint32_t *uint32s = types, *constants = types + w[3], *arrays = types + 2*w[3], *pointers = types + 3*w[3];
+    uint32_t *bytes = types + 4*w[3], *workptr = types + 5*w[3];
     uint32_t entry = 0, modes = 0, payloads = 0, capability = 0;
     int valid = 0;
     for (uint64_t i = 5; i < s->words;) {
@@ -1004,14 +1006,28 @@ static int mesh_spirv(const GfxShader *s) {
             if (modes & bit) goto out;
             modes |= bit;
         } else if (op == 331) goto out; // OpExecutionModeId is not part of this literal-size contract.
-        else if (op == OP_TYPE_INT && n == 4 && a[0] < w[3]) uint32s[a[0]] = a[1] == 32 && a[2] == 0;
-        else if (op == OP_CONSTANT && n == 4 && a[0] < w[3] && a[1] < w[3] && uint32s[a[0]]) constants[a[1]] = a[2];
-        else if (op == OP_TYPE_ARRAY && n == 4 && a[0] < w[3] && a[1] < w[3] && a[2] < w[3] && uint32s[a[1]])
-            arrays[a[0]] = constants[a[2]];
-        else if (op == OP_TYPE_POINTER && n == 4 && a[0] < w[3] && a[2] < w[3] && a[1] == 5402)
-            pointers[a[0]] = arrays[a[2]];
-        else if (op == OP_VARIABLE && n >= 4 && a[2] == 5402) {
+        else if (op == OP_TYPE_INT && n == 4 && a[0] < w[3]) {
+            uint32s[a[0]] = a[1] == 32 && a[2] == 0;
+            if (a[1] == 8 || a[1] == 16 || a[1] == 32 || a[1] == 64) bytes[a[0]] = a[1] / 8;
+        } else if (op == OP_TYPE_FLOAT && n == 3 && a[0] < w[3]) {
+            if (a[1] == 16 || a[1] == 32 || a[1] == 64) bytes[a[0]] = a[1] / 8;
+        } else if (op == OP_TYPE_VECTOR && n == 4 && a[0] < w[3] && a[1] < w[3] && a[2] >= 2 && a[2] <= 4) {
+            // Round a three-component vector to its four-component alignment for array storage.
+            uint64_t size = (uint64_t)bytes[a[1]] * (a[2] == 3 ? 4 : a[2]);
+            if (size <= UINT32_MAX) bytes[a[0]] = (uint32_t)size;
+        } else if (op == OP_CONSTANT && n == 4 && a[0] < w[3] && a[1] < w[3] && uint32s[a[0]]) constants[a[1]] = a[2];
+        else if (op == OP_TYPE_ARRAY && n == 4 && a[0] < w[3] && a[1] < w[3] && a[2] < w[3]) {
+            if (uint32s[a[1]]) arrays[a[0]] = constants[a[2]];
+            uint64_t size = (uint64_t)bytes[a[1]] * constants[a[2]];
+            if (size <= UINT32_MAX) bytes[a[0]] = (uint32_t)size;
+        } else if (op == OP_TYPE_POINTER && n == 4 && a[0] < w[3] && a[2] < w[3]) {
+            if (a[1] == 5402) pointers[a[0]] = arrays[a[2]];
+            if (a[1] == 4) workptr[a[0]] = bytes[a[2]]; // Workgroup, including generated ISBE scratch
+        } else if (op == OP_VARIABLE && n >= 4 && a[2] == 5402) {
             if (a[0] >= w[3] || !pointers[a[0]] || pointers[a[0]] != m->payload_words || ++payloads > 1) goto out;
+        } else if (op == OP_VARIABLE && n >= 4 && a[2] == 4) {
+            if (a[0] >= w[3] || !workptr[a[0]] || m->shared_bytes > UINT32_MAX - workptr[a[0]]) goto out;
+            m->shared_bytes += workptr[a[0]];
         }
         i += n;
     }
