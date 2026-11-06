@@ -4,6 +4,36 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### User selects the no-specular result; first BRDF factor probes measured
+
+The user confirms `bright-culling-18/capture-3` (only material specular omitted)
+is closer to the original, whereas restored capture 6 remains too bright.
+Retain capture 3 as a visual comparison target. This supports following the
+material specular contribution; it does not justify deleting ordinary specular
+lighting or applying a hash-specific material correction.
+
+With the same loaded map and no grass changes, captures 10-13 expose the BRDF
+angles, shape, shared gains and roughness compensation; capture 14 restores the
+normal shader. All modules pass spirv-val and the runner verifies the exact
+captured identity after 75 or more presented frames. Per-probe depth matching
+retains about 758,000-763,000 terrain pixels. Measurements are stored in
+`bright-culling-18/brdf-statistics.json`:
+
+- N.H / N.V / V.H mean [0.91896, 0.95194, 0.94439]; respective medians
+  [0.9375, 0.96875, 0.953125]. These do not show a widespread zero half-vector
+  dot product that would force Fresnel toward one.
+- Material roughness mean 0.56412, compensated alpha mean 0.32197, BRDF factor
+  mean 0.03657. The roughness-squared probe averages 0.32184. These results do
+  not show a large roughness compensation multiplier in this view.
+- Distance fade mean 0.99998, shared specular visibility/gain mean 0.93991,
+  cubemap BRDF gain mean 0.01629. Median values are [1, 0.9765625, 0.0161133].
+
+This narrows the next check to the VS Location4 incident-light colour feeding
+the dominant specular branch, its SH/visibility inputs and native evaluation.
+It does not prove that every BRDF operation is correct, or establish original
+hardware exposure. No production specular scale or branch exclusion was added.
+The live game is restored and remains open; numerical override files are gone.
+
 ### Brightness takes priority over vegetation; material reflection removal compared
 
 The user explicitly directs us to resolve brightness before enabling grass,

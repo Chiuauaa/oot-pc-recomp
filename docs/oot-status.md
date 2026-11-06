@@ -2,6 +2,16 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: no-specular capture selected as visual reference
+
+- User confirms capture 3 is closer to original; restored capture 6 remains
+  too bright. Keep the landscape exposed and leave grass execution deferred.
+- Live BRDF factor probes find plausible dot products, roughness compensation
+  and gains in this view; no broad Fresnel-one or excessive scalar gain is
+  measured. Follow the VS Location4 incident-light colour next.
+- Capture 14 restores production rendering. Document exact identities, masks
+  and numbers in the handoff. No production light multiplier was introduced.
+
 ## 6 November 2026: prioritize brightness; split the landscape specular veil
 
 - User directs brightness investigation before enabling grass. Keep mesh draw
