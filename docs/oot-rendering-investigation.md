@@ -4,6 +4,66 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Brightness takes priority over vegetation; material reflection removal compared
+
+The user explicitly directs us to resolve brightness before enabling grass,
+because restored coverage could hide the landscape defect. Defer mesh/grass
+execution work while keeping the existing visible terrain for diagnosis. This
+supersedes treating vegetation restoration as the next visual test.
+
+The game was closed normally, rebuilt and reopened with visible console/file
+logging. Before that steering, capture 1 under `bright-culling-18` measured
+11 indirect compute prefixes as [0,1,1] and one as [1200,1,1], plus the previous
+41 zero mesh prefixes. The nonzero compute control verifies that the readback
+is not simply returning zeros. This does not identify a culling defect. No
+further culling work is required for the current brightness priority. A private
+managed translator diagnostic was built but not installed; its temporary source
+edit was restored, leaving the installed translator unchanged.
+
+After map readiness, live numerical probes preserve the landscape shader's
+resource declarations and replace only its final RGB sum. Capture 2 tags the
+landscape. Captures 3, 4 and 5 respectively omit term D (specular), term B
+(ambient) and term C (material fog contribution); capture 6 restores production.
+The full remaining pipeline, including tone mapping and display encoding, still
+runs. This tests the presented image rather than judging an isolated linear-HDR
+PNG as if it were display encoded. All probes pass spirv-val and their captured
+shader identities are verified after at least 75 presented frames.
+
+The blue/white veil is substantially reduced when D is omitted. Removing B
+makes the terrain dark but leaves a strong blue reflection; omitting C changes
+little in this near-ground view. A second reversible test removes only D's
+sky/sun BRDF factor (`%2488`, capture 7), then only its cubemap BRDF factor
+(`%2490`, capture 8), and restores the original shader in capture 9. These are
+diagnostic exclusions, not a justified production fix or a global light scale.
+No mesh/grass draws were enabled.
+
+Across 705,565 exact depth-matched terrain pixels, excluding HUD/minimap areas,
+the material and final display means are:
+
+| Diagnostic | Material RGB | Display sRGB |
+| --- | --- | --- |
+| Normal restored | [0.26151, 0.26015, 0.18826] | [0.65370, 0.66575, 0.55608] |
+| Without D | [0.20697, 0.19262, 0.08661] | [0.58431, 0.58231, 0.36258] |
+| Without B | [0.11397, 0.10897, 0.11783] | [0.39763, 0.41087, 0.42168] |
+| Without C | [0.24151, 0.24551, 0.17763] | [0.63870, 0.65357, 0.54061] |
+| Without sky/sun specular | [0.22297, 0.20799, 0.10473] | [0.60851, 0.60631, 0.40986] |
+| Without cubemap specular | [0.24375, 0.24301, 0.16910] | [0.63297, 0.64692, 0.52626] |
+
+The matching display samples follow the game's 1280x720 to 1706x960 blit and
+exclude overlays; they are comparisons across stationary-camera captures, not
+exact same-frame summands. Character/foliage animation and any changing light
+remain limits. `whitening-statistics.json`, the manifests/capture records and
+`analyze_whitening.py` retain the private evidence in `bright-culling-18`.
+
+The dominant blue specular contribution is therefore the sky/sun BRDF branch,
+not the cubemap branch or C. It reads VS Location4 colour and multiplies it by
+the material BRDF/distance fade and `%2488 = %1622 * %2342 * c6[68].x`. The next
+brightness work is to check those shared lighting inputs and BRDF factors against
+native shader arithmetic, preserving the material's ordinary lighting and
+shadows. Removing the whole branch is not proof that the branch is incorrectly
+translated. Both numerical overrides and their hash sidecars are removed after
+capture 9; the game remains open in production rendering.
+
 ### Mesh pipeline construction implemented; indirect GPU arguments measured
 
 `VkPipeState` now has separate mesh/task shader pointers after its frozen legacy

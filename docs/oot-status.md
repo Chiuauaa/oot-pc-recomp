@@ -2,6 +2,21 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: prioritize brightness; split the landscape specular veil
+
+- User directs brightness investigation before enabling grass. Keep mesh draw
+  execution deferred so new coverage cannot conceal the terrain defect.
+- Run reversible material component exclusions through the full display chain.
+  Removing specular substantially reduces whitening; removing ambient leaves a
+  blue reflection, while removing the material fog term has a smaller effect.
+- Split specular: the sky/sun BRDF branch contributes most of the blue veil,
+  exceeding the cubemap branch. Document 705,565 matched-pixel comparisons and
+  exact probe identities in the rendering investigation. No branch is disabled
+  in production; capture 9 restores normal rendering.
+- Game was rebuilt/reopened with console/file logging. Pipeline GPU validation
+  remains clean, and indirect-header tests pass 34 checks. No new visual fix
+  is claimed; inspect the sky/sun BRDF inputs rather than covering the symptom.
+
 ## 6 November 2026: mesh pipelines created on GPU; indirect prefixes are zero
 
 - Implement mesh/task graphics pipeline construction with separate resource

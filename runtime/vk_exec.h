@@ -178,7 +178,8 @@ extern int vk_dump_armed;
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
 void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
-// Capture-only replay order, including skipped conditional operations. No GPU reads or state changes.
+// Capture-only replay order, including skipped conditional operations. Optional indirect-count probes
+// explicitly split/wait for GPU readback; ordinary command logging does not read or change GPU state.
 void vk_dump_replay_note(VkExec *ex, const char *fmt, ...);
 void vk_dump_replay_op(VkExec *ex, uint32_t op, const void *payload);
 void vk_dump_draw_skip(VkExec *ex, const char *reason);   // failed or pending draws, grouped per pass and program

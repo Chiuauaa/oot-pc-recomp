@@ -478,6 +478,7 @@ static int active(void) {
 // Commands are a separate log so aggregate pass parsing and pass numbering stay unchanged.
 // The entry records existing replay state only: it must not resolve targets, wait for GPU work,
 // or re-read counter memory, any of which could change the conditional-render timing being measured.
+// The separate opt-in indirect-count probe in vk_dump_replay_op explicitly performs an ordered GPU readback.
 void vk_dump_replay_note(VkExec *ex, const char *fmt, ...) {
     plat_mutex_lock(&rec_lock);
     if (!active()) goto out;
@@ -552,6 +553,29 @@ void vk_dump_replay_op(VkExec *ex, uint32_t op, const void *payload) {
     case OP_DRAW_IDX_IND:
         vk_dump_replay_note(ex, "draw-indexed-indirect");
         break;
+    case OP_DISPATCH_IND: {
+        const p_dispatch_ind *p = payload;
+        vk_dump_replay_note(ex, "dispatch-indirect argument-buffer=%#llx caller=%#llx",
+                            (unsigned long long)p->ind, (unsigned long long)p->caller);
+        // Explicitly intrusive capture probe: order prior GPU stores before reading the counts.
+        // Normal command logging never waits or substitutes CPU values for dispatch arguments.
+        static int read_args = -1;
+        if (read_args < 0) {
+            const char *e = getenv("DKB_INDIRECT_ARGS_READBACK");
+            read_args = e && !strcmp(e, "1");
+        }
+        if (read_args && vk_dump_armed) {
+            uint32_t groups[3];
+            if (vk_exec_read_buffer(ex, p->ind, sizeof groups, groups))
+                vk_dump_replay_note(ex, "dispatch-indirect GPU-counts addr=%#llx groups=%u,%u,%u caller=%#llx",
+                                    (unsigned long long)p->ind, groups[0], groups[1], groups[2],
+                                    (unsigned long long)p->caller);
+            else
+                vk_dump_replay_note(ex, "dispatch-indirect GPU-counts unavailable addr=%#llx",
+                                    (unsigned long long)p->ind);
+        }
+        break;
+    }
     case OP_DRAW_MESH: {
         const p_draw_mesh *p = payload;
         // Keep each capture's arguments: the once-per-program startup log can describe another scene.
