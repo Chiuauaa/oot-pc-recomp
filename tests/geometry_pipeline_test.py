@@ -35,6 +35,7 @@ def shader_adapter():
     enum = source[start:source.index('};', start) + 2]
     names = ['static void reflect_spirv(', 'const uint32_t *gfx_shader_spirv(',
              'int gfx_shader_stage(', 'const GfxShaderGeometry *gfx_shader_geometry(',
+             'const GfxShaderMesh *gfx_shader_mesh(',
              'int gfx_shader_resources(', 'uint32_t gfx_shader_inputs(',
              'uint32_t gfx_shader_outputs(', 'const uint8_t *gfx_shader_input_id(']
     return '\n'.join([struct, enum] + [interface.function(source, name) for name in names])

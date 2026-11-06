@@ -4,6 +4,71 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Mesh pipeline construction implemented; indirect GPU arguments measured
+
+`VkPipeState` now has separate mesh/task shader pointers after its frozen legacy
+prefix. `vk_pipeline.c::pre_raster`, `gkey_fill`, `pipe_miss` and
+`create_graphics` accept mesh+fragment or task+mesh+fragment. Mesh/task/fragment
+resources occupy consecutive binding spans with binding zero shared; module
+rebinding and layout coverage use the same offsets. These variants use a
+monolithic layout and pipeline; legacy graphics-pipeline-library and persisted
+VS/FS key records exclude them. Vertex input/assembly and their dynamic states
+are absent, and the ordinary provoking-vertex extension chain is omitted.
+Traditional VS/FS and VS/GS/FS construction retain their existing policies.
+
+`vk_mesh_output_limits` validates flat output arrays, effective scalar component
+counts, per-vertex/per-primitive allocation granularity, total output memory and
+combined payload/output memory against device properties. Primitive index
+arrays are excluded from attribute storage. Blocks, packed components and
+per-view outputs are rejected by this bounded implementation; ordinary
+per-vertex fragment varyings must have matching scalar types/width and enough
+components. The rules follow the Vulkan specification's Mesh Shader Output
+formula: https://docs.vulkan.org/spec/latest/chapters/interfaces.html . This
+is separate from the existing local-size/shared-memory/payload checks. The
+private corpus's 36 mesh output interfaces pass under the recorded fixed test
+budgets; that check is not actual-device admission for each captured program.
+
+Validation of the new code uses original, public GLSL fixtures, not game code:
+`tests/mesh_pipeline_test.py` compiles them, validates their SPIR-V and exercises
+the production builder with CPU Vulkan spies (400 checks at O0 and O2). It
+checks stage composition, resource rebinding, absence of vertex-only state and
+several output/interface rejection cases. `--gpu` builds the same production
+builder into a headless executable and creates both pipeline shapes on the
+NVIDIA GeForce RTX 5080 with Khronos validation enabled: 15 checks pass and zero
+validation errors. This GPU check **creates pipelines only**; it does not draw
+or validate native task payload semantics. The ordinary geometry pipeline
+suite passes 6,289 checks at both O0 and O2. Binding/client/metadata suites pass
+(78 binding and 52 metadata checks per optimization). Runtime compilation and
+linking pass. No native mesh draw has been enabled or visual fix claimed.
+
+A new opt-in `DKB_MESH_ARGS_READBACK=1` probe in `vk_dump.c::vk_dump_mesh` reads
+only the first two words of each indirect mesh argument buffer during an armed
+capture. It uses `vk_exec_read_buffer`, resolving the GPU-visible backing and
+performing an ordered copy and split/wait. This perturbs capture timing and
+must not be confused with a passive capture or enabled in normal runs. The
+raw words are logged without asserting their still-unverified native layout.
+The ordinary command log continues to record each direct first/count and caller.
+`vk_dump.c::nvn_stage` also now maps GS/TCS/TES/task/mesh resources to their actual
+NVN stages instead of labeling every non-VS/FS stage as compute.
+
+After the user confirmed the map and stationary camera, the new session's
+`build/oot-fix/bright-mesh-17/commands.txt` contains 41 ordered GPU reads from
+25 unique indirect buffers: every prefix is [0,0]. Thus the earlier CPU-zero
+observation is now independently reproduced on GPU-visible storage at the draw
+position. It still does not prove a failed store: an empty culling input or
+legitimate culling could produce this result. The same frame has 13 direct mesh
+calls, all first=0, with nonzero task counts between 2 and 32. The game remains
+open with console/file logging; no capture was taken during loading.
+
+Remaining work: connect mesh shader lookup/resource binding and draw replay;
+validate native first-task and task payload semantics; establish indirect record
+layout and trace actual culling inputs/outputs. In particular, `0x0x0` in existing
+indirect compute pass headers is a logging placeholder from `op_dispatch_ind`,
+which calls `vk_dump_dispatch` with zero dimensions after `vkCmdDispatchIndirect`.
+It must **not** be treated as evidence that Vulkan dispatched zero workgroups.
+The zero mesh prefixes make the culling producer worth tracing before expecting
+that enabling indirect mesh commands alone will restore terrain coverage.
+
 ### Same-frame brightness transition and mesh-shadow dependency measured
 
 The user identifies `bright-landscape-16/capture-8/pass_0125_t0` as close to the

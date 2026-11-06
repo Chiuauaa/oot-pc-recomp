@@ -18,8 +18,8 @@ this experimental service without the applicable source and license material.
 Mesh registers are inferred from NVN control fields and marked
 `inferred_registers` in reflection. This remains an unverified ABI hypothesis.
 Valid SPIR-V does not demonstrate correct geometry or payload interoperability.
-The current runtime service client does not implement mesh pipeline creation or
-mesh draw execution. `VK_EXT_mesh_shader` capability detection alone does not
+The runtime now constructs mesh/task graphics pipelines, but mesh draw replay is
+still unconnected. `VK_EXT_mesh_shader` capability detection alone does not
 make `OP_DRAW_MESH` render.
 
 CPU client checks:
@@ -37,3 +37,16 @@ Reflection now requires `mesh.version = 1`. The runtime compares its literal
 execution fields and flat payload array to SPIR-V before admitting the shader
 into its cache. Run `tests/mesh_shader_contract_test.py` for synthetic contract
 and device-limit checks. These checks do not verify the inferred native ABI.
+
+Pipeline checks using original GLSL (no game data):
+
+```powershell
+.venv/Scripts/python.exe tests/mesh_pipeline_test.py
+.venv/Scripts/python.exe tests/mesh_pipeline_test.py --gpu
+```
+
+The default uses CPU Vulkan spies at O0/O2. The optional headless GPU check
+requires a task/mesh-capable Vulkan 1.3 device and the Khronos validation layer;
+it creates pipelines but does not draw. Both use MSYS2 UCRT64 glslang, SPIR-V
+Tools and Clang. The bounded output contract accepts flat compiler interfaces;
+blocks, per-view outputs and packed component layouts remain unsupported.

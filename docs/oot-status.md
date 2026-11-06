@@ -2,6 +2,21 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: mesh pipelines created on GPU; indirect prefixes are zero
+
+- Implement mesh/task graphics pipeline construction with separate resource
+  spans, output/interface memory checks and no vertex-only state. Original
+  fixture tests pass 400 CPU checks at O0/O2 and create both pipeline shapes on
+  RTX 5080 with zero Vulkan validation errors. Existing geometry tests pass
+  6,289 checks at each optimization. Native draw execution remains unconnected.
+- Capture ordered GPU-visible mesh argument prefixes after map readiness:
+  41 reads of 25 buffers are all [0,0]; 13 direct calls have nonzero counts.
+  This strengthens the culling-input investigation, but empty outputs alone
+  do not prove a failed store or the source of the residual brightness.
+- Keep the console visible and game open. Runtime build passes. The handoff
+  documents the intrusive opt-in readback and the indirect-dispatch logging
+  placeholder, which must not be interpreted as actual zero GPU dimensions.
+
 ## 6 November 2026: brightness transition and mesh-shadow mask isolated
 
 - Correlate the user-identified capture 8 pass 125 and capture 17 pass 153:

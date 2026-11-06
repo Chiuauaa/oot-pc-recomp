@@ -722,7 +722,18 @@ static void flush_luts(VkExec *ex, int n) {
     nluts = 0;
 }
 
-static int nvn_stage(int gfx_stage) { return gfx_stage == GFX_STAGE_VS ? 0 : gfx_stage == GFX_STAGE_FS ? 1 : 5; }
+static int nvn_stage(int gfx_stage) {
+    switch (gfx_stage) {
+    case GFX_STAGE_VS: return 0;
+    case GFX_STAGE_FS: return 1;
+    case GFX_STAGE_GS: return 2;
+    case GFX_STAGE_TCS: return 3;
+    case GFX_STAGE_TES: return 4;
+    case GFX_STAGE_TS: return VK_EXEC_TASK;
+    case GFX_STAGE_MS: return VK_EXEC_MESH;
+    default: return 5;
+    }
+}
 
 static const char *decl_type(uint16_t t, char tmp[24]) {
     static const char *base[] = {"?", "1D", "buffer", "2D", "3D", "cube"};
@@ -897,6 +908,21 @@ void vk_dump_mesh(VkExec *ex, const void *payload) {
     static uint64_t seen[MAX_MESH_PROGS];
     static unsigned nseen;
     const p_draw_mesh *m = payload;
+    // Explicit capture-only probe: read the argument prefix through the GPU-visible backing.
+    // A split/wait changes timing, so normal captures and replay never perform this readback.
+    static int read_args = -1;
+    if (read_args < 0) {
+        const char *e = getenv("DKB_MESH_ARGS_READBACK");
+        read_args = e && !strcmp(e, "1");
+    }
+    if (read_args && vk_dump_armed && m->indirect) {
+        uint32_t words[2];
+        if (vk_exec_read_buffer(ex, m->arg[0], sizeof words, words))
+            vk_dump_replay_note(ex, "mesh-indirect GPU-prefix addr=%#llx words=%#x,%#x (layout unverified)",
+                                (unsigned long long)m->arg[0], words[0], words[1]);
+        else
+            vk_dump_replay_note(ex, "mesh-indirect GPU-prefix unavailable addr=%#llx", (unsigned long long)m->arg[0]);
+    }
     uint64_t serial = ex->prog ? ex->prog->serial : 0;
     int fresh = 0;
     plat_mutex_lock(&rec_lock);

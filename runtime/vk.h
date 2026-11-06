@@ -469,6 +469,7 @@ typedef struct VkPipeState {
     float alpha_ref;                       // OP_BIND_STATE kind 7: reference of color.alpha_func's test. After gs, so not in
                                            // the pipeline-key records: a prebuilt alpha-test pipeline has reference 0 and
                                            // goes unused, and the draw builds its own
+    const GfxShader *mesh, *task;           // native mesh path; VS/GS must be NULL, TS optional
 } VkPipeState;
 void vk_pipe_state_defaults(VkPipeState *s);   // NVN defaults of every state object (shaders and formats left 0)
 enum { VK_PIPE_SUPPORT = GFX_RES_KINDS };      // VkPipeBinding.kind of the support buffer
