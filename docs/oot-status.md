@@ -2,6 +2,20 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: brightness transition and mesh-shadow mask isolated
+
+- Correlate the user-identified capture 8 pass 125 and capture 17 pass 153:
+  the visible lift occurs at the shared bloom/tone-map shader, then display
+  encoding. Same-frame CPU replay and separate live bloom/scene controls pass;
+  a duplicated sRGB conversion is not measured.
+- Trace omitted mesh shadow draws to a screen-mask input of the terrain shader.
+  Correct alpha-channel endpoints show strong attenuation of ambient and direct
+  light. This proves an input dependency, not the absent meshes' coverage or
+  that their omission explains the whole reported brightness.
+- Restore normal rendering after capture 17. Record mesh packet arguments in
+  future command captures; runtime compilation passes. No new visual fix is
+  claimed. See the rendering investigation handoff for numbers and caveats.
+
 ## 6 November 2026: task/mesh bindings and actual shared allocations tested
 
 - Map TS/MS to separate NVN resource stages and driver storage tables

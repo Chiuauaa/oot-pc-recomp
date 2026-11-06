@@ -4,6 +4,83 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### Same-frame brightness transition and mesh-shadow dependency measured
+
+The user identifies `bright-landscape-16/capture-8/pass_0125_t0` as close to the
+intended terrain appearance, and capture 17's pass 153 as the point where it
+looks washed out. Capture 8 is restored production rendering: landscape FS
+`87657d96d845342b`, native `78e6bf688b49647c`, with no numerical override. This
+is a user-provided visual reference, not an original-console measurement.
+
+Pass numbers vary between frames. Capture 8 pass 152 and capture 17 pass 153
+are the same fullscreen program 13367, FS `65156d0c69e40c69`, native
+`73320e720a317817`. Its inputs are the 1280x720 scene at `0x80003c0200` and the
+240x135 bloom image at `0x8000924800`; output is at `0x80010e0c00`. This stage
+combines bloom and applies the ACES-like curve. It is not a mesh draw.
+
+A new coverage probe in capture 2 and exact depth matching retain 777,509
+landscape pixels in capture 8. Mean linear RGB along that same frame is:
+
+| Stage | Mean RGB |
+| --- | --- |
+| Material, pass 125 | [0.25760, 0.25704, 0.18781] |
+| Last scene input, pass 135 | [0.26182, 0.26046, 0.19193] |
+| Tone-map output, pass 152 | [0.39891, 0.41466, 0.29565] |
+| CPU tone map without bloom | [0.35514, 0.37256, 0.26584] |
+| Predicted display encoding of pass 152 | [0.65149, 0.66368, 0.55782] |
+
+Captured constants are gain 1 and bloom power 1.5. CPU reconstruction of the
+unmodified tone map agrees within 1.065 target-storage ULP. The final pass 161
+is a sampled copy into sRGB: mean error over its active 1706x960 rectangle is
+0.001001 for one sRGB encoding, 0.191128 for two and 0.238076 for none. The
+progressively brighter PNGs thus include measured tone mapping and display
+encoding; they do not by themselves prove repeated additive blending. These
+checks establish agreement with the translated arithmetic, not correct native
+lighting/exposure. Do not fix the symptom by disabling required display encoding.
+
+Live controls repeat the separation in this view: capture 9 removes only the
+bloom contribution, capture 10 removes only the scene contribution, and capture
+11 restores the production shader. Both variants pass `spirv-val`, their hashes
+appear in the captures, and their respective CPU equations agree within 1.001
+and 1.093 storage ULP. Bloom contributes but does not explain the entire lift.
+
+The missing-mesh hypothesis has a specific input path. In the retained capture
+53 from `bright-fog-source-15`, mesh draws are omitted in the three 1600x1600
+D16 shadow layers (passes 115-117), as well as scene-colour passes. In the new
+capture the shadow array is at `0x80013eda00`; FS `1549cf5eb1f1b52f` samples it
+and contributes to the screen mask at `0x8002329c00`, sampled by the landscape
+as FS slot 17 (`fp_t_tcb_2A`). Shader inspection distinguishes its channels:
+the producer explicitly writes blue = 1; the shadow result reaches alpha.
+The initial blue-channel endpoints (captures 3-8) measure an attenuation input
+but must **not** be cited as proof of a missing-mesh shadow effect.
+
+Correct alpha-channel endpoints follow in captures 12-17, preserving all
+resources and the other sampled channels. Across 763,022 depth-matched terrain
+pixels, normal sampled alpha averages 0.96397 (median 0.984375). Forcing alpha
+0 versus 1 changes total material mean RGB from [0.05950, 0.04066, 0.01468]
+to [0.26154, 0.26179, 0.19135]; the ambient component alone changes from
+[0.00593, 0.00423, 0.00092] to [0.14856, 0.15247, 0.07143]. This demonstrates
+that this mask can attenuate ambient as well as direct light. It does not
+establish the absent meshes' coverage, their actual indirect counts, or how
+much shadow the original scene should have. Capture 17 restores production
+rendering; both override files and hash sidecars are removed.
+
+Private reproducible evidence is under `build/oot-fix/bright-landscape-16`:
+`post-ledger.json`, `post-probe-cpu-check.json`, `mesh-shadow-statistics.json`,
+`terrain-probes/*-captures.json` and the probe generation/analysis scripts.
+Do not reuse the initial root capture as a same-camera numeric baseline:
+only 25,479 pixels retain exact depth when intersected with the full later
+sequence. Endpoint comparisons use the matching restored capture instead;
+restoration is verified by shader identity, not a self-comparison statistic.
+
+To retain actionable draw evidence in later captures, `vk_dump.c::vk_dump_replay_op`
+now records each mesh draw's direct first/count or indirect-buffer address,
+plus caller, in `commands.txt`. The previous generic `draw-mesh` line lost
+these arguments; the once-per-program startup log may describe another scene.
+The change reads packet fields only, without waiting or reading GPU-owned
+indirect contents from a stale CPU copy. Runtime compilation passes. This is
+a diagnostic improvement, not mesh execution or a new visual correction.
+
 ### Task/mesh resource tables and generated Workgroup memory checked
 
 The next integration pass extends stage mappings before enabling execution:

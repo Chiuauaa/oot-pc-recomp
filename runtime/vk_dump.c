@@ -552,9 +552,19 @@ void vk_dump_replay_op(VkExec *ex, uint32_t op, const void *payload) {
     case OP_DRAW_IDX_IND:
         vk_dump_replay_note(ex, "draw-indexed-indirect");
         break;
-    case OP_DRAW_MESH:
-        vk_dump_replay_note(ex, "draw-mesh");
+    case OP_DRAW_MESH: {
+        const p_draw_mesh *p = payload;
+        // Keep each capture's arguments: the once-per-program startup log can describe another scene.
+        // Indirect contents are GPU-owned; record their address without reading a stale CPU copy.
+        if (p->indirect)
+            vk_dump_replay_note(ex, "draw-mesh indirect argument-buffer=%#llx caller=%#llx",
+                                (unsigned long long)p->arg[0], (unsigned long long)p->caller);
+        else
+            vk_dump_replay_note(ex, "draw-mesh direct first-task=%llu task-count=%llu caller=%#llx",
+                                (unsigned long long)p->arg[0], (unsigned long long)p->arg[1],
+                                (unsigned long long)p->caller);
         break;
+    }
     default: break;
     }
 }
