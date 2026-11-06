@@ -2,6 +2,218 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: task/mesh compiler client continued and bounded
+
+- Retain task/mesh native inputs and stage-6/7 resource bindings; add an
+  experimental native compiler client and Vulkan capability detection.
+- Correct the remaining six-element answer cache, bound resource request
+  serialization, validate exact reply keys, and test the production client.
+- Client O0/O2, shader-control, native-stage and mesh-recorder checks pass;
+  runtime compilation succeeds; all 41 retained compiler fixtures validate.
+- Mesh pipelines/draw execution and metadata validation are still missing.
+  This is partial integration, not a confirmed brightness or missing-mesh fix.
+- The investigation handoff also records atmospheric upload/sample comparisons
+  through capture 63 and the limits of those measurements.
+
+## 6 November 2026: dynamic ambient contribution isolated; normalization checked
+
+- Suppressing additions only in compute `21238adc0f99baaf` reduces terrain
+  term B substantially; restoring it reproduces baseline. This is diagnostic,
+  not a correction. Normal FS and CS are restored in capture 54.
+- An independent same-frame CPU integration matches the GPU's L0 magnitude
+  within one R11/R10 diagnostic storage ULP. No large new normalization error
+  is established. Continue through its atmospheric 3D input and the separate
+  baked/visibility texture; do not disable ambient light as a permanent fix.
+- The investigation handoff records exact values, native VS disassembly,
+  artifact paths and the latest upstream review. No new brightness fix is claimed.
+
+## 6 November 2026: terrain texture is dark before lighting
+
+- New live probes find dark blended/final material albedo near RGB
+  [0.101,0.092,0.028]. GPU-side range tests find no large blend-weight
+  extrapolation in 673,768 marked, depth-matched terrain pixels.
+- Red environment/material terms B/D dominate direct-loop term A in this view.
+  Trace their cubemap and ambient inputs next; their magnitude alone is not a
+  confirmed defect. The investigation document records masks and caveats.
+- Follow-up control-flow-correct probes narrow about 96% of red term B to
+  evaluated vertex lighting coefficients, about half of total terrain red in
+  this view. Its cubemap-diffuse gain is zero; uniform ambient is small.
+  Trace VS coefficient reads/normalization next. The handoff explicitly rejects
+  three earlier component probes that missed the conditional multiplier.
+- No new production brightness correction is claimed.
+
+## 6 November 2026: darker appearance is the user's original-game reference
+
+- The user confirms the darker tonality is closer to the original, which has much
+  less glow. Diagnose excessive brightening; do not brighten stones to match the
+  washed-out landscape. This does not certify every earlier dark intermediate pass.
+
+
+## 6 November 2026: shared tonality and postprocessing checked in one frame
+
+- The user clarifies dark stones were an observation of PC captures, not a console
+  reference. Do not assume stones are correct or limit the fault to landscape.
+- Fresh depth-matched landscape coverage excludes destination-colour accumulation:
+  zero source red produces zero red at every tested pixel. Linear depth matches
+  master geometry depth; near-ground fog adds little in this view.
+- Passes 126?134 barely change that region's mean. Pass 151's tone-map/bloom math
+  matches CPU replay within 1.077 HDR storage ULP. Its source reaches the upscaler
+  unchanged, and final output matches one sRGB encode, not two. Original exposure
+  and lighting correctness remain unresolved; no arbitrary scale was added.
+- Evidence and exact figures are in the investigation handoff. Diagnostic probes
+  are removed; the confirmed flicker correction remains enabled.
+
+## 6 November 2026: continuous landscape material identified
+
+- Coverage probes identify native FS `78e6bf688b49647c` for continuous soil,
+  separate from stone paths. Its environment-cube/material terms contribute
+  alongside shadowed lighting, but erroneous emission is not established.
+- The normal-length probe remains near one. Four isolated colour terms are finite;
+  no speculative normalization, roughness or brightness change is installed.
+- In user-identified capture 27, all 56,767 sky pixels remaining at pass 175 are
+  replaced at pass 176. The earlier depth pass 173 uses a different attachment.
+  These intermediate holes do not prove final missing terrain. Excessive final
+  brightness is still open. The user supplied a better landscape-dominant angle
+  for a fresh mask and a controlled material-blending test.
+
+## 6 November 2026: solar contribution isolated in the fog producer
+
+- Accepted compute probes in the loaded map show direct solar terms dominate the
+  remaining scattering. A same-dispatch red-component probe measures approximately
+  99% direct solar, with a small remainder. This localizes arithmetic to inspect;
+  it does not prove the game's sun intensity needs scaling.
+- A no-history sample is close to normal and two visibility factors are not stuck
+  at all-visible. No temporal runaway is measured. Diagnostic acceptance and a
+  corrected blue-channel selection are documented, with invalid samples excluded.
+- Original compute is verified restored in capture 12. No fragment/compute probe
+  is active, conditions are normal, and the flicker correction remains enabled.
+  Excessive brightness is still unresolved; no speculative lighting patch added.
+
+## 6 November 2026: remaining light increase isolated inside fog arithmetic
+
+- Accepted component probes show the scene-input pass reproduces all 921,600 pixels
+  exactly. Pre-fog changes little; fog transmission stays at or below 1, while its
+  scattering term adds mean RGB [0.3348,0.2920,0.2509]. No duplicate destination
+  blend, wrong live near/far constants or temporal runaway is measured here.
+- These findings localize the increase, not a confirmed brightness correction.
+  The scattering producer's sunlight, ambient/local light and history remain the
+  next targets. Private component statistics and acceptance caveats are documented.
+- Added opt-in compute probes sharing the fragment declaration guard and restore
+  logic. Control/profile tests and the declaration guard pass; runtime build/link
+  pass. Prepared producer probes preserve declarations and pass spirv-val. No
+  permanent density/exposure multiplier or shader suppression is enabled.
+- Audited a fork claiming a fog fix: its documented recommendation rejects fog
+  shaders. No suppression workaround was imported.
+
+## 6 November 2026: remaining washed-out surfaces are a separate investigation
+
+- The user confirms the ground stopped flickering, then clarifies that approaching
+  remaining bright surfaces reveals textures. Continue tracing lighting and
+  distance-dependent composition rather than assuming white texture replacements.
+- Within one corrected frame, the full-screen composite raises mean HDR RGB from
+  [0.4006, 0.3239, 0.2429] to [0.9042, 0.7056, 0.4805]. This localizes an increase,
+  not a proven duplicate accumulation bug. Strong highlights also remain in a
+  temporary composite-skip capture. Different camera positions prevent a final
+  image numerical A/B. The skip file is restored and no brightness scale is added.
+
+## 6 November 2026: unfinished occlusion counters were read as stale completed counts
+
+- Three loaded-map command captures confirm the 256-report ring forgets unfinished
+  sample reports: the frames contain roughly 1,880 reports. Hundreds of material
+  conditions then use stale counts, including zero counts that skip stone draws.
+- Replaced the ring with a growing table retaining the newest report per address
+  until completion. Timestamp-zero and conservative pending-sample semantics stay
+  intact. The correction applies to every material and uses no shader hash.
+- Production helper/reader tests pass 248,199 checks at each of O0/O2; compile/link
+  pass. The user confirms flicker is gone. Three corrected captures show all 17
+  stone draws present, zero lost pending sample reports, no sky words in the road
+  ROI, and timestamp-guarded depth clears still disabled. Evidence is under
+  `bright-coverage-fixed-14/pending-fix-validation.json`.
+- Some meshes remain white according to the user. The remaining brightness and
+  geometry faults are not considered solved; preserve this confirmed correction.
+
+## 6 November 2026: conditional replay diagnostics include skipped ground draws
+
+- Active captures now add bounded `commands.txt` with operation order, conditional
+  counter inputs/decisions, attachment addresses, draw identity and depth clears.
+  The previous pass summaries omitted conditionally skipped draws entirely.
+- This does not change conditional-render decisions. Incremental compile/link
+  pass; the second startup reaches a responding window with visible console and
+  file log. `bright-coverage-13` captured three loaded-map frames and exposed the counter
+  lifetime defect above. No capture during loading or shader compilation was taken.
+
+## 6 November 2026: ground flicker narrowed to material coverage
+
+- In normal-condition captures 2 and 4 of `bright-subword-12`, the same road ROI
+  changes from zero to 25,969 exact sky-colour words out of 27,000 pixels, despite
+  valid depth and an identical stone texture. This is evidence of missing material
+  coverage; the exact conditional/geometry/raster cause remains unresolved.
+- Captures 5?7 were a separate force-all-conditions experiment. They also allow
+  conditional clears, leaving the material depth attachment entirely 1.0 and the
+  entire material output exactly equal to the preceding sky. This diagnostic
+  failure starts before the stone material, not as a white texture replacement.
+- Normal conditions are restored. A single pending-query-skip capture and a normal
+  control both retain road coverage; neither proves a permanent fix. See the
+  investigation handoff for measurements, caveats and evidence paths.
+
+## 6 November 2026: shared subword-load translation implemented
+
+- Guarded global U8/S8/U16/S16 loads now use the existing byte/halfword extraction
+  with correct alignment and descriptor bounds. No shader hash or game-specific
+  lighting multiplier is involved; vendor source remains unchanged.
+- Fourteen CPU/translation tests, 34 subword GPU fixtures and six scalar/vector GPU
+  regressions pass. Replaying 60 captured failures recovers 23 request variants
+  across three distinct compute-code blobs; the rest reach the descriptor limit.
+- The new translator and matching identity are installed beside the runtime, and
+  the game is reopened with a direct visible console and normal host file log.
+  Startup retries were also needed with the retained old translator; the captured
+  fault is a host Cpu-register spill with an ARM return address as its pointer,
+  before compute execution. The map is now loaded; comparisons above still show
+  brightness/coverage faults.
+
+## 6 November 2026: transport correction covers related shader variants
+
+- The linear tensor replacement selects pre-transport colour by declared image
+  writes, backing/view formats, dimensions and input uniqueness. The shader-hash
+  gate is removed; ambiguous, missing or incompatible inputs keep the prior path.
+- Production source-selection tests pass in 16 cases at O0 and O2. Build/link pass
+  with 31 jobs. Loaded-map capture confirms an exact source match and a destination
+  within 1.049 storage ULPs of bilinear resizing, without the extra brightness lift.
+- Stone-path probes find variable first-light visibility, rather than universally
+  missing shadows. A related material reads the same global light block. Material
+  brightness and missing colour coverage remain under investigation.
+
+## 6 November 2026: one additional brightness contribution corrected
+
+- The user's pass comparison isolated a real brightness lift after tone-mapping:
+  the linear replacement for the tensor upscaler displayed square-root-encoded
+  RGB9E5 transport values. For the identified native packer, it now uses the unique
+  pre-encoding floating-point colour input. The newer entry generalises selection
+  by the resource contract, removing the initial shader-hash gate.
+- Live capture verifies an exact source match and output within 1.193 storage ULPs
+  of bilinear resizing, with no extra brightness lift or device loss. The user
+  reports fewer blown-out areas. Production selection tests pass at O0 and O2.
+- Earlier overexposure and missing colour coverage remain. Omitting the sky draws
+  exposes black areas where material colour is absent; these should be investigated
+  separately from the corrected upscaler. See the investigation document's opening
+  section for evidence and limitations.
+
+## 6 November 2026: white areas and brightness narrowed down (Windows, RTX 5080)
+
+- **Frame rate:** 60 fps in the world without `TOTK_VK_VALIDATION`; the earlier 15 fps
+  came from the validation layer in the test launchers, not from the code.
+- **White world:** mostly the Bananza light-quad NVIDIA filter, which matched ordinary
+  Ocarina materials; it is now opt-in (`TOTK_FIX_VS_FAULT=1`).
+- **Remaining white patches:** terrain colour skipped by occlusion conditions. Native
+  SDK audit disproves the earlier type-16 samples-passed hypothesis: it is a timestamp;
+  samples passed remains type 1. Predicate macro semantics and GPU-visible records
+  need checking before a production fix (details and next steps in
+  `docs/oot-rendering-investigation.md`, "Handoff").
+- **Still too bright:** exposure is a constant 1.0 outdoors; the fog chain is under
+  investigation. Mesh draws are still not replayed.
+- Translator patch 0024 (float atomic add), Lichii #144 and the FSEL/SHF lowering fixes
+  are in; production lowering accepts 6391 of 6455 captured stages.
+
 ## 5 November 2026 (afternoon): the world renders on Linux
 
 - **State:** Zuriel-Zurichi's `fix/oot-rendering-3d` (c3ad87b: NVN view formats, RGB9E5, followed-texture formats,
