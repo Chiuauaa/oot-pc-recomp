@@ -67,11 +67,24 @@ NVN_API(nvnCommandBufferSetComputeOverlapMode) { (void)c; }
 // variable-rate shading, conditional enables, device command buffers), they are accepted and
 // recorded nowhere, and the first call of each is logged, so a run lists what the back end still has to do. None of
 // them returns a value.
+// OOT_NVN2_LOG=1 also logs the arguments of the first 8 calls of each, and every 600th call with its count, so one
+// run shows which of these a title calls, how often and with what (a blend clamp on, a compute pass disabled).
+static int nvn2_log_on(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("OOT_NVN2_LOG") != NULL;
+    return on;
+}
+static void nvn2_note(const char *name, volatile int64_t *calls, const Cpu *c) {
+    int64_t n = __atomic_add_fetch(calls, 1, __ATOMIC_RELAXED);
+    if (n == 1) rt_log("nvn2: %s accepted, not recorded yet", name);
+    if (!nvn2_log_on() || (n > 8 && n % 600)) return;
+    rt_log("nvn2: %s call %lld args %#llx %#llx %#llx %#llx", name, (long long)n, (unsigned long long)arg_x(c, 1),
+           (unsigned long long)arg_x(c, 2), (unsigned long long)arg_x(c, 3), (unsigned long long)arg_x(c, 4));
+}
 #define NVN2_NOT_RECORDED(n)                                                                                         \
     NVN_API(n) {                                                                                                     \
-        static volatile int32_t logged;                                                                              \
-        (void)c;                                                                                                     \
-        if (!__atomic_exchange_n(&logged, 1, __ATOMIC_RELAXED)) rt_log("nvn2: " #n " accepted, not recorded yet");   \
+        static volatile int64_t calls;                                                                               \
+        nvn2_note(#n, &calls, c);                                                                                    \
     }
 #define NVN2_MODE_NOT_RECORDED(n, kind)                                                                               \
     NVN_API(n) {                                                                                                    \
