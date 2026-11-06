@@ -4,6 +4,56 @@
 
 Read this section first; the rest of the file is the dated log it summarises.
 
+### User-identified pass 149: separate tone curve and bloom tested live
+
+The user identifies `bright-culling-18/capture-14/pass_0149_t0` as excessively
+bright and considers the preceding appearance close to original. Pass 149 is
+FS `65156d0c69e40c69`, native `73320e720a317817`, the same bloom/tone-map shader
+identified in previous captures. Its full-resolution scene input comes from
+pass 132, not the numerically adjacent pass 148 (a 240x135 bloom level).
+Capture 14 is restored production rendering, without the BRDF probes.
+
+Reconstruction of this exact frame reproduces the output within 1.055 storage
+ULP using gain 1 and bloom exponent 1.5. Over 762,984 matching terrain pixels,
+scene mean RGB [0.26717,0.26659,0.19571] becomes [0.40688,0.42349,0.30135] after
+the composite. `capture14-tonemap-ledger.json` retains the per-stage values.
+The observed brightening is real; arithmetic agreement is not proof that the
+original exposure, input radiance or displayed appearance is correct.
+
+A new live test isolates both operations through the final display pipeline:
+
+| Capture | Variant | Display sRGB mean RGB |
+| --- | --- | --- |
+| 18 | Bypass curve, retain bloom/gain | [0.56456,0.57391,0.47662] |
+| 19 | Bypass curve and bloom, retain graded scene | [0.52713,0.53841,0.45161] |
+| 20 | Retain curve, omit bloom | [0.61884,0.63271,0.52766] |
+| 21 | Restore production shader | [0.65415,0.66594,0.55690] |
+
+These are 710,248 exact-depth-matched terrain samples, mapped through the
+1280x720-to-1706x960 display blit, with HUD/minimap regions excluded. Capture
+18 still shows a blue/grey veil despite a lower mean; reducing global exposure
+or bypassing the curve is not equivalent to removing the material specular
+component selected by the user. Keep both the material input and the final
+composition in the investigation rather than explaining the entire symptom
+with bloom, gamma, or missing grass alone. Probe declarations are unchanged,
+spirv-val and captured hashes pass, and all overrides are removed afterward.
+
+A constant-pattern scan of retained original shader modules finds the four
+curve constants (2.51,2.43,0.59,0.14) together only in `65156d0c69e40c69`, used
+once in capture 14. This is a screening result, not proof that another shader
+cannot apply a different curve. `tone-curve-module-scan.json` records that limit.
+`tone-curve-statistics.json` and `terrain-probes/tone-curve-captures.json` retain
+the experiment under ignored `build/oot-fix/bright-culling-18`.
+
+The preceding incident-light probes (capture 15 colour, capture 16 direction,
+capture 17 restored) measure the VS Location4 input as mean RGB
+[1.06781,1.44355,2.32622], median [1.140625,1.546875,2.5]. The incoming field is
+blue-weighted before the BRDF and final tone mapping. The encoded direction's
+median length is 0.98982 after R11/R10 quantization; there is no large direction
+length amplification in these samples. Raw HDR incident radiance exceeding one
+is not alone an error. This guides further native/SH input comparison without
+asserting that the field should be clamped or deleting its specular response.
+
 ### User selects the no-specular result; first BRDF factor probes measured
 
 The user confirms `bright-culling-18/capture-3` (only material specular omitted)

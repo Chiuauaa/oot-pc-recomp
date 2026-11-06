@@ -2,6 +2,18 @@
 
 Newest first. Title 0400486024DEC000, update 1.1.1, build `oot111`.
 
+## 6 November 2026: user-identified composite tested with curve and bloom separated
+
+- Capture 14 pass 149 is the shared tone-map composite. Its scene input is
+  pass 132; pass 148 is the reduced bloom image. Reconstruct this frame within
+  1.055 storage ULP and record the actual rise in terrain radiance.
+- Live captures 18-21 separate curve, bloom and restoration. Bypassing the
+  curve lowers display brightness substantially but retains a blue/grey veil;
+  it does not reproduce the user's preferred material-reflection exclusion.
+- Measure the blue-weighted incident-light colour entering the BRDF and a
+  near-unit direction. Keep input-lighting and composition evidence distinct.
+  No visual workaround is installed; normal rendering is restored.
+
 ## 6 November 2026: no-specular capture selected as visual reference
 
 - User confirms capture 3 is closer to original; restored capture 6 remains
