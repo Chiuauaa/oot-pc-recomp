@@ -37,13 +37,26 @@ travadas e efeitos faltando são os mesmos problemas conhecidos do port Windows 
 - Pacotes (exemplo Arch):
 
   ```sh
-  sudo pacman -S --needed clang lld ninja make pkgconf sdl3 opus libvpx zstd \
+  sudo pacman -S --needed clang lld ninja make pkgconf sdl3 opus libvpx dav1d zstd \
       vulkan-headers vulkan-icd-loader vulkan-validation-layers shaderc spirv-tools \
       dotnet-sdk uv git
   ```
 
   Debian/Ubuntu: `clang lld ninja-build make pkg-config libsdl3-dev libopus-dev libvpx-dev
-  libzstd-dev libvulkan-dev vulkan-validationlayers-dev glslang-tools spirv-tools dotnet-sdk-10.0`.
+  libdav1d-dev libzstd-dev libvulkan-dev vulkan-validationlayers-dev glslang-tools spirv-tools dotnet-sdk-10.0`.
+
+  Fedora (44, testado numa toolbx): `sudo dnf install --skip-unavailable clang lld ninja-build
+  make pkgconf-pkg-config SDL3-devel opus-devel libvpx-devel dav1d-devel libzstd-devel
+  vulkan-headers vulkan-loader-devel vulkan-validation-layers vulkan-tools spirv-tools
+  libstdc++-static dotnet-sdk-10.0 uv git`. `libstdc++-static` é fácil de esquecer: a linha de
+  link carrega `-l:libstdc++.a` e o pacote `libstdc++` do Fedora só traz a biblioteca estática
+  de 32 bits. O Fedora 44 não tem Python 3.12, então `uv python install 3.12` vem antes de
+  `uv venv --python 3.12 .venv`. O NativeAOT (`tools/build_xlate.py`) não precisa de nenhuma
+  opção extra ali: o `clang` e o `lld` do sistema bastam.
+
+  O `dav1d` é necessário para o `runtime/ov_codec.c` — as cutscenes de Ocarina são AV1, e sem
+  `dav1d/dav1d.h` a compilação do runtime para.
+
   O `vk_mem_alloc.h` (Vulkan Memory Allocator) é baixado uma vez para `toolchain/vma/` se
   não estiver no sistema.
 
