@@ -311,6 +311,7 @@ __asm__(".text\n"
         ".p2align 4\n"
         "plat_fiber_entry:\n"
         "    movq %r13, %rdi\n"
+        "    andq $-16, %rsp\n"   /* entered by fiber_swap's ret with rsp = top - 8: align for the call (x86-64 ABI) */
         "    callq *%r12\n"
         "    ud2\n"
         ".size plat_fiber_entry, .-plat_fiber_entry\n");
